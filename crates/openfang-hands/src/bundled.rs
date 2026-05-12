@@ -1,6 +1,6 @@
 //! Compile-time embedded Hand definitions.
 
-use crate::{HandDefinition, HandError};
+use crate::{parse_hand_toml, HandDefinition, HandError};
 
 /// Returns all bundled hand definitions as (id, HAND.toml content, SKILL.md content).
 pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
@@ -40,6 +40,16 @@ pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
             include_str!("../bundled/browser/HAND.toml"),
             include_str!("../bundled/browser/SKILL.md"),
         ),
+        (
+            "trader",
+            include_str!("../bundled/trader/HAND.toml"),
+            include_str!("../bundled/trader/SKILL.md"),
+        ),
+        (
+            "infisical-sync",
+            include_str!("../bundled/infisical-sync/HAND.toml"),
+            include_str!("../bundled/infisical-sync/SKILL.md"),
+        ),
     ]
 }
 
@@ -50,7 +60,7 @@ pub fn parse_bundled(
     skill_content: &str,
 ) -> Result<HandDefinition, HandError> {
     let mut def: HandDefinition =
-        toml::from_str(toml_content).map_err(|e| HandError::TomlParse(e.to_string()))?;
+        parse_hand_toml(toml_content).map_err(|e| HandError::TomlParse(e.to_string()))?;
     if !skill_content.is_empty() {
         def.skill_content = Some(skill_content.to_string());
     }
@@ -71,7 +81,7 @@ mod tests {
     #[test]
     fn bundled_hands_count() {
         let hands = bundled_hands();
-        assert_eq!(hands.len(), 7);
+        assert_eq!(hands.len(), 9);
     }
 
     #[test]
@@ -156,7 +166,7 @@ mod tests {
         assert!(def.tools.contains(&"event_publish".to_string()));
         assert!(!def.settings.is_empty());
         assert!(!def.dashboard.metrics.is_empty());
-        assert_eq!(def.agent.max_iterations, Some(80));
+        assert_eq!(def.agent.max_iterations, Some(25));
     }
 
     #[test]
@@ -187,7 +197,7 @@ mod tests {
         assert_eq!(def.name, "Browser Hand");
         assert_eq!(def.category, crate::HandCategory::Productivity);
         assert!(def.skill_content.is_some());
-        assert!(!def.requires.is_empty()); // requires python3, playwright
+        assert!(!def.requires.is_empty()); // requires python3 + chromium
         assert_eq!(def.requires.len(), 2);
         assert!(def.tools.contains(&"browser_navigate".to_string()));
         assert!(def.tools.contains(&"browser_click".to_string()));
@@ -199,6 +209,26 @@ mod tests {
         assert!(!def.dashboard.metrics.is_empty());
         assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
         assert_eq!(def.agent.max_iterations, Some(60));
+    }
+
+    #[test]
+    fn parse_trader_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "trader")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "trader");
+        assert_eq!(def.name, "Trading Hand");
+        assert_eq!(def.category, crate::HandCategory::Data);
+        assert!(def.skill_content.is_some());
+        assert!(def.requires.is_empty()); // no hard requirements
+        assert!(!def.tools.is_empty());
+        assert!(def.tools.contains(&"event_publish".to_string()));
+        assert!(!def.settings.is_empty());
+        assert!(!def.dashboard.metrics.is_empty());
+        assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
+        assert_eq!(def.agent.max_iterations, Some(80));
     }
 
     #[test]
@@ -216,7 +246,14 @@ mod tests {
 
     #[test]
     fn all_einstein_hands_have_schedules() {
-        let einstein_ids = ["lead", "collector", "predictor", "researcher", "twitter"];
+        let einstein_ids = [
+            "lead",
+            "collector",
+            "predictor",
+            "researcher",
+            "twitter",
+            "trader",
+        ];
         for (id, toml_content, skill_content) in bundled_hands() {
             if einstein_ids.contains(&id) {
                 let def = parse_bundled(id, toml_content, skill_content).unwrap();
@@ -241,7 +278,14 @@ mod tests {
 
     #[test]
     fn all_einstein_hands_have_memory() {
-        let einstein_ids = ["lead", "collector", "predictor", "researcher", "twitter"];
+        let einstein_ids = [
+            "lead",
+            "collector",
+            "predictor",
+            "researcher",
+            "twitter",
+            "trader",
+        ];
         for (id, toml_content, skill_content) in bundled_hands() {
             if einstein_ids.contains(&id) {
                 let def = parse_bundled(id, toml_content, skill_content).unwrap();
@@ -260,8 +304,135 @@ mod tests {
     }
 
     #[test]
+    fn parse_infisical_sync_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "infisical-sync")
+            .expect("infisical-sync hand must be in bundled_hands()");
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "infisical-sync");
+        assert_eq!(def.name, "Infisical Sync Hand");
+        assert_eq!(def.category, crate::HandCategory::Security);
+        assert!(def.skill_content.is_some());
+        // Required env vars
+        assert!(
+            !def.requires.is_empty(),
+            "infisical-sync must declare env var requirements"
+        );
+        let req_keys: Vec<&str> = def.requires.iter().map(|r| r.key.as_str()).collect();
+        assert!(
+            req_keys.contains(&"INFISICAL_URL"),
+            "must require INFISICAL_URL"
+        );
+        assert!(
+            req_keys.contains(&"INFISICAL_CLIENT_ID"),
+            "must require INFISICAL_CLIENT_ID"
+        );
+        assert!(
+            req_keys.contains(&"INFISICAL_CLIENT_SECRET"),
+            "must require INFISICAL_CLIENT_SECRET"
+        );
+        // Einstein scheduling tools
+        assert!(
+            def.tools.contains(&"schedule_create".to_string()),
+            "must have schedule_create"
+        );
+        assert!(
+            def.tools.contains(&"schedule_list".to_string()),
+            "must have schedule_list"
+        );
+        assert!(
+            def.tools.contains(&"schedule_delete".to_string()),
+            "must have schedule_delete"
+        );
+        // Memory tools
+        assert!(
+            def.tools.contains(&"memory_store".to_string()),
+            "must have memory_store"
+        );
+        assert!(
+            def.tools.contains(&"memory_recall".to_string()),
+            "must have memory_recall"
+        );
+        // Knowledge graph tools
+        assert!(
+            def.tools.contains(&"knowledge_add_entity".to_string()),
+            "must have knowledge_add_entity"
+        );
+        assert!(
+            def.tools.contains(&"knowledge_add_relation".to_string()),
+            "must have knowledge_add_relation"
+        );
+        assert!(
+            def.tools.contains(&"knowledge_query".to_string()),
+            "must have knowledge_query"
+        );
+        // Event bus
+        assert!(
+            def.tools.contains(&"event_publish".to_string()),
+            "must have event_publish"
+        );
+        // Infisical-specific tools
+        assert!(
+            def.tools.contains(&"shell_exec".to_string()),
+            "must have shell_exec"
+        );
+        assert!(
+            def.tools.contains(&"vault_set".to_string()),
+            "must have vault_set"
+        );
+        assert!(
+            def.tools.contains(&"vault_get".to_string()),
+            "must have vault_get"
+        );
+        assert!(
+            def.tools.contains(&"vault_list".to_string()),
+            "must have vault_list"
+        );
+        assert!(
+            def.tools.contains(&"vault_delete".to_string()),
+            "must have vault_delete"
+        );
+        // Dashboard
+        assert!(
+            !def.dashboard.metrics.is_empty(),
+            "must have dashboard metrics"
+        );
+        let metric_keys: Vec<&str> = def
+            .dashboard
+            .metrics
+            .iter()
+            .map(|m| m.memory_key.as_str())
+            .collect();
+        assert!(
+            metric_keys.contains(&"infisical_sync_secrets_count"),
+            "must have secrets_count metric"
+        );
+        assert!(
+            metric_keys.contains(&"infisical_sync_last_sync"),
+            "must have last_sync metric"
+        );
+        // Agent config
+        assert!(
+            !def.agent.system_prompt.is_empty(),
+            "must have system_prompt"
+        );
+        assert!(
+            def.agent.temperature < 0.2,
+            "security hand should use low temperature"
+        );
+    }
+
+    #[test]
     fn all_einstein_hands_have_knowledge_graph() {
-        let einstein_ids = ["lead", "collector", "predictor", "researcher", "twitter"];
+        let einstein_ids = [
+            "lead",
+            "collector",
+            "predictor",
+            "researcher",
+            "twitter",
+            "trader",
+        ];
         for (id, toml_content, skill_content) in bundled_hands() {
             if einstein_ids.contains(&id) {
                 let def = parse_bundled(id, toml_content, skill_content).unwrap();

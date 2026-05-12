@@ -25,7 +25,15 @@ function settingsPage() {
     providerUrlSaving: {},
     providerTesting: {},
     providerTestResults: {},
+    providerSearch: '',
+    providerStatusFilter: '',
+    providerCategoryFilter: '',
     copilotOAuth: { polling: false, userCode: '', verificationUri: '', pollId: '', interval: 5 },
+    customProviderName: '',
+    customProviderUrl: '',
+    customProviderKey: '',
+    customProviderStatus: '',
+    addingCustomProvider: false,
     loading: true,
     loadError: '',
 
@@ -219,8 +227,13 @@ function settingsPage() {
         this.providers = data.providers || [];
         for (var i = 0; i < this.providers.length; i++) {
           var p = this.providers[i];
-          if (p.is_local && p.base_url && !this.providerUrlInputs[p.id]) {
-            this.providerUrlInputs[p.id] = p.base_url;
+          if (p.is_local) {
+            if (!this.providerUrlInputs[p.id]) {
+              this.providerUrlInputs[p.id] = p.base_url || '';
+            }
+            if (this.providerUrlSaving[p.id] === undefined) {
+              this.providerUrlSaving[p.id] = false;
+            }
           }
         }
       } catch(e) { this.providers = []; }
@@ -253,6 +266,17 @@ function settingsPage() {
       }
     },
 
+    async deleteCustomModel(modelId) {
+      if (!confirm('Delete custom model "' + modelId + '"?')) return;
+      try {
+        await OpenFangAPI.del('/api/models/custom/' + encodeURIComponent(modelId));
+        OpenFangToast.success('Model deleted');
+        await this.loadModels();
+      } catch(e) {
+        OpenFangToast.error('Failed to delete: ' + (e.message || 'Unknown error'));
+      }
+    },
+
     async loadConfigSchema() {
       try {
         var results = await Promise.all([
@@ -274,11 +298,14 @@ function settingsPage() {
 
     async saveConfigField(section, field, value) {
       var key = section + '.' + field;
+      // Root-level fields (api_key, api_listen, log_level) use just the field name
+      var sectionMeta = this.configSchema && this.configSchema[section];
+      var path = (sectionMeta && sectionMeta.root_level) ? field : key;
       this.configSaving[key] = true;
       try {
-        await OpenFangAPI.post('/api/config/set', { path: key, value: value });
+        await OpenFangAPI.post('/api/config/set', { path: path, value: value });
         this.configDirty[key] = false;
-        OpenFangToast.success('Saved ' + key);
+        OpenFangToast.success('Saved ' + field);
       } catch(e) {
         OpenFangToast.error('Failed to save: ' + e.message);
       }
@@ -314,6 +341,94 @@ function settingsPage() {
       return Object.keys(seen).sort();
     },
 
+    /// Coarse category for a provider used to group the Providers tab.
+    /// Returns: 'frontier' | 'oss' | 'local' | 'aggregator' | 'regional' | 'other'.
+    providerCategory(p) {
+      if (!p) return 'other';
+      if (p.is_local || p.key_required === false) return 'local';
+      var id = (p.id || '').toLowerCase();
+      var FRONTIER = ['anthropic','openai','gemini','google','xai','bedrock','azure','vertex'];
+      var OSS = ['groq','together','fireworks','cerebras','sambanova','deepseek','mistral','perplexity','cohere','ai21','huggingface','replicate','nvidia','venice','novita','chutes'];
+      var AGG = ['openrouter','litellm','github-copilot','claude-code'];
+      var REGIONAL = ['qwen','minimax','zhipu','zai','moonshot','qianfan','volcengine','kimi'];
+      if (FRONTIER.indexOf(id) !== -1) return 'frontier';
+      if (REGIONAL.indexOf(id) !== -1) return 'regional';
+      if (AGG.indexOf(id) !== -1) return 'aggregator';
+      if (OSS.indexOf(id) !== -1) return 'oss';
+      return 'other';
+    },
+
+    providerCategoryLabel(cat) {
+      switch (cat) {
+        case 'frontier':   return 'Frontier (Anthropic, OpenAI, Google, xAI, Bedrock)';
+        case 'oss':        return 'Open-Weight Hosts (Groq, Together, Fireworks, DeepSeek, etc.)';
+        case 'aggregator': return 'Aggregators & Gateways (OpenRouter, GitHub Copilot)';
+        case 'regional':   return 'Regional / China (Qwen, Zhipu, Moonshot, MiniMax)';
+        case 'local':      return 'Local / Self-Hosted (Ollama, vLLM, LM Studio, Lemonade)';
+        default:           return 'Other Providers';
+      }
+    },
+
+    /// Stable category order for grouped rendering.
+    get providerCategoriesOrdered() {
+      return ['frontier', 'oss', 'aggregator', 'regional', 'local', 'other'];
+    },
+
+    /// Returns filter-matched providers grouped by category, preserving order.
+    /// Each entry: { category, label, items: [...] }. Empty groups are omitted.
+    get providersGrouped() {
+      var self = this;
+      var filtered = this.filteredProviders;
+      var by = {};
+      filtered.forEach(function(p) {
+        var c = self.providerCategory(p);
+        if (!by[c]) by[c] = [];
+        by[c].push(p);
+      });
+      // Sort each group: configured first, then alphabetical
+      Object.keys(by).forEach(function(c) {
+        by[c].sort(function(a, b) {
+          var ac = a.auth_status === 'configured' ? 0 : 1;
+          var bc = b.auth_status === 'configured' ? 0 : 1;
+          if (ac !== bc) return ac - bc;
+          return (a.display_name || a.id).localeCompare(b.display_name || b.id);
+        });
+      });
+      var out = [];
+      this.providerCategoriesOrdered.forEach(function(c) {
+        if (by[c] && by[c].length) {
+          out.push({ category: c, label: self.providerCategoryLabel(c), items: by[c] });
+        }
+      });
+      return out;
+    },
+
+    get filteredProviders() {
+      var self = this;
+      return this.providers.filter(function(p) {
+        if (self.providerStatusFilter === 'configured' && p.auth_status !== 'configured') return false;
+        if (self.providerStatusFilter === 'unconfigured' && p.auth_status === 'configured') return false;
+        if (self.providerCategoryFilter && self.providerCategory(p) !== self.providerCategoryFilter) return false;
+        if (self.providerSearch) {
+          var q = self.providerSearch.toLowerCase();
+          if ((p.display_name || '').toLowerCase().indexOf(q) === -1 &&
+              (p.id || '').toLowerCase().indexOf(q) === -1 &&
+              (p.api_key_env || '').toLowerCase().indexOf(q) === -1) return false;
+        }
+        return true;
+      });
+    },
+
+    get configuredProviderCount() {
+      return this.providers.filter(function(p) { return p.auth_status === 'configured'; }).length;
+    },
+
+    clearProviderFilters() {
+      this.providerSearch = '';
+      this.providerStatusFilter = '';
+      this.providerCategoryFilter = '';
+    },
+
     get uniqueTiers() {
       var seen = {};
       this.models.forEach(function(m) { if (m.tier) seen[m.tier] = true; });
@@ -328,7 +443,10 @@ function settingsPage() {
 
     providerAuthText(p) {
       if (p.auth_status === 'configured') return 'Configured';
-      if (p.auth_status === 'not_set' || p.auth_status === 'missing') return 'Not Set';
+      if (p.auth_status === 'not_set' || p.auth_status === 'missing') {
+        if (p.id === 'claude-code') return 'Not Installed';
+        return 'Not Set';
+      }
       return 'No Key Needed';
     },
 
@@ -374,8 +492,12 @@ function settingsPage() {
       var key = this.providerKeyInputs[provider.id];
       if (!key || !key.trim()) { OpenFangToast.error('Please enter an API key'); return; }
       try {
-        await OpenFangAPI.post('/api/providers/' + encodeURIComponent(provider.id) + '/key', { key: key.trim() });
-        OpenFangToast.success('API key saved for ' + provider.display_name);
+        var resp = await OpenFangAPI.post('/api/providers/' + encodeURIComponent(provider.id) + '/key', { key: key.trim() });
+        if (resp && resp.switched_default) {
+          OpenFangToast.warning(resp.message || 'Default provider was switched to ' + provider.display_name);
+        } else {
+          OpenFangToast.success('API key saved for ' + provider.display_name);
+        }
         this.providerKeyInputs[provider.id] = '';
         await this.loadProviders();
         await this.loadModels();
@@ -481,6 +603,34 @@ function settingsPage() {
         OpenFangToast.error('Failed to save URL: ' + e.message);
       }
       this.providerUrlSaving[provider.id] = false;
+    },
+
+    async addCustomProvider() {
+      var name = this.customProviderName.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+      if (!name) { OpenFangToast.error('Please enter a provider name'); return; }
+      var url = this.customProviderUrl.trim();
+      if (!url) { OpenFangToast.error('Please enter a base URL'); return; }
+      if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
+        OpenFangToast.error('URL must start with http:// or https://'); return;
+      }
+      this.addingCustomProvider = true;
+      this.customProviderStatus = '';
+      try {
+        var result = await OpenFangAPI.put('/api/providers/' + encodeURIComponent(name) + '/url', { base_url: url });
+        if (this.customProviderKey.trim()) {
+          await OpenFangAPI.post('/api/providers/' + encodeURIComponent(name) + '/key', { key: this.customProviderKey.trim() });
+        }
+        this.customProviderName = '';
+        this.customProviderUrl = '';
+        this.customProviderKey = '';
+        this.customProviderStatus = '';
+        OpenFangToast.success('Provider "' + name + '" added' + (result.reachable ? ' (reachable)' : ' (not reachable yet)'));
+        await this.loadProviders();
+      } catch(e) {
+        this.customProviderStatus = 'Error: ' + (e.message || 'Failed');
+        OpenFangToast.error('Failed to add provider: ' + e.message);
+      }
+      this.addingCustomProvider = false;
     },
 
     // -- Security methods --

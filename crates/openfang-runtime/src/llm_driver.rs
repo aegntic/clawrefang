@@ -40,6 +40,12 @@ pub enum LlmError {
         /// How long to wait before retrying.
         retry_after_ms: u64,
     },
+    /// Authentication failed (invalid/missing API key).
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
+    /// Model not found.
+    #[error("Model not found: {0}")]
+    ModelNotFound(String),
 }
 
 /// A request to an LLM for completion.
@@ -80,12 +86,24 @@ impl CompletionResponse {
         self.content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 ContentBlock::Thinking { .. } => None,
                 _ => None,
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    /// Check if the response has any meaningful content (including Thinking blocks).
+    /// Used to distinguish true empty responses from thinking-only responses.
+    pub fn has_any_content(&self) -> bool {
+        self.content.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => !text.is_empty(),
+            ContentBlock::Thinking { thinking, .. } => !thinking.is_empty(),
+            ContentBlock::RedactedThinking { data } => !data.is_empty(),
+            ContentBlock::ToolUse { .. } | ContentBlock::Image { .. } => true,
+            _ => false,
+        })
     }
 }
 
@@ -118,6 +136,7 @@ pub enum StreamEvent {
     },
     /// Tool execution completed with result (emitted by agent loop, not LLM driver).
     ToolExecutionResult {
+        id: String,
         name: String,
         result_preview: String,
         is_error: bool,
@@ -161,6 +180,40 @@ pub struct DriverConfig {
     pub api_key: Option<String>,
     /// Base URL override.
     pub base_url: Option<String>,
+    /// Skip interactive permission prompts (Claude Code provider only).
+    ///
+    /// When `true`, adds `--dangerously-skip-permissions` to the spawned
+    /// `claude` CLI.  Defaults to `true` because OpenFang runs as a daemon
+    /// with no interactive terminal, so permission prompts would block
+    /// indefinitely.  OpenFang's own capability / RBAC layer already
+    /// restricts what agents can do, making this safe.
+    #[serde(default = "default_skip_permissions")]
+    pub skip_permissions: bool,
+
+    /// Per-message subprocess turn timeout in seconds.
+    ///
+    /// Caps how long the runtime will wait for a single CLI subprocess turn
+    /// (one message round-trip) before killing the process and reporting a
+    /// timeout failure. When unset, the driver's own default is used
+    /// (currently 300s). Long-context Opus calls with heavy tool surfaces
+    /// routinely take >4 minutes, so users running large prompts may want
+    /// to bump this to 480–600s.
+    ///
+    /// Can also be overridden at runtime via the
+    /// `OPENFANG_SUBPROCESS_TIMEOUT_SECS` env var, which wins over both
+    /// this field and the driver default.
+    ///
+    /// **Scope:** Currently only honored by `provider = "claude-code"`.
+    /// Other providers (`default`, `qwen-code`, `openai`, `bedrock`, etc.)
+    /// accept the field for forward-compatibility but silently ignore it
+    /// today. As additional subprocess-based drivers are added, they will
+    /// opt in to this field individually.
+    #[serde(default)]
+    pub subprocess_timeout_secs: Option<u64>,
+}
+
+fn default_skip_permissions() -> bool {
+    true
 }
 
 /// SECURITY: Custom Debug impl redacts the API key.
@@ -170,6 +223,8 @@ impl std::fmt::Debug for DriverConfig {
             .field("provider", &self.provider)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("base_url", &self.base_url)
+            .field("skip_permissions", &self.skip_permissions)
+            .field("subprocess_timeout_secs", &self.subprocess_timeout_secs)
             .finish()
     }
 }
@@ -184,9 +239,11 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "Hello ".to_string(),
+                    provider_metadata: None,
                 },
                 ContentBlock::Text {
                     text: "world!".to_string(),
+                    provider_metadata: None,
                 },
             ],
             stop_reason: StopReason::EndTurn,
@@ -249,6 +306,7 @@ mod tests {
                 Ok(CompletionResponse {
                     content: vec![ContentBlock::Text {
                         text: "Hello!".to_string(),
+                        provider_metadata: None,
                     }],
                     stop_reason: StopReason::EndTurn,
                     tool_calls: vec![],

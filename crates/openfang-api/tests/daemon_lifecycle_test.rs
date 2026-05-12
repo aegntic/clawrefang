@@ -98,6 +98,7 @@ async fn test_full_daemon_lifecycle() {
             model: "test".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            subprocess_timeout_secs: None,
         },
         ..KernelConfig::default()
     };
@@ -113,6 +114,9 @@ async fn test_full_daemon_lifecycle() {
         bridge_manager: tokio::sync::Mutex::new(None),
         channels_config: tokio::sync::RwLock::new(Default::default()),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        clawhub_cache: dashmap::DashMap::new(),
+        provider_probe_cache: openfang_runtime::provider_health::ProbeCache::new(),
+        budget_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
     });
 
     let app = Router::new()
@@ -222,6 +226,7 @@ async fn test_server_immediate_responsiveness() {
             model: "test".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            subprocess_timeout_secs: None,
         },
         ..KernelConfig::default()
     };
@@ -236,6 +241,9 @@ async fn test_server_immediate_responsiveness() {
         bridge_manager: tokio::sync::Mutex::new(None),
         channels_config: tokio::sync::RwLock::new(Default::default()),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        clawhub_cache: dashmap::DashMap::new(),
+        provider_probe_cache: openfang_runtime::provider_health::ProbeCache::new(),
+        budget_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
     });
 
     let app = Router::new()

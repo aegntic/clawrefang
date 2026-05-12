@@ -106,19 +106,15 @@ impl MemoryState {
     fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryAction {
         let total = self.agents.len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if total > 0 {
-                    let i = self.agent_list_state.selected().unwrap_or(0);
-                    let next = if i == 0 { total - 1 } else { i - 1 };
-                    self.agent_list_state.select(Some(next));
-                }
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                let i = self.agent_list_state.selected().unwrap_or(0);
+                let next = if i == 0 { total - 1 } else { i - 1 };
+                self.agent_list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if total > 0 {
-                    let i = self.agent_list_state.selected().unwrap_or(0);
-                    let next = (i + 1) % total;
-                    self.agent_list_state.select(Some(next));
-                }
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                let i = self.agent_list_state.selected().unwrap_or(0);
+                let next = (i + 1) % total;
+                self.agent_list_state.select(Some(next));
             }
             KeyCode::Enter => {
                 if let Some(sel) = self.agent_list_state.selected() {
@@ -166,19 +162,15 @@ impl MemoryState {
                 self.kv_pairs.clear();
                 self.selected_agent = None;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if total > 0 {
-                    let i = self.kv_list_state.selected().unwrap_or(0);
-                    let next = if i == 0 { total - 1 } else { i - 1 };
-                    self.kv_list_state.select(Some(next));
-                }
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                let i = self.kv_list_state.selected().unwrap_or(0);
+                let next = if i == 0 { total - 1 } else { i - 1 };
+                self.kv_list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if total > 0 {
-                    let i = self.kv_list_state.selected().unwrap_or(0);
-                    let next = (i + 1) % total;
-                    self.kv_list_state.select(Some(next));
-                }
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                let i = self.kv_list_state.selected().unwrap_or(0);
+                let next = (i + 1) % total;
+                self.kv_list_state.select(Some(next));
             }
             KeyCode::Char('a') => {
                 self.sub = MemorySub::AddKey;
@@ -196,10 +188,8 @@ impl MemoryState {
                     }
                 }
             }
-            KeyCode::Char('d') => {
-                if self.kv_list_state.selected().is_some() {
-                    self.confirm_delete = true;
-                }
+            KeyCode::Char('d') if self.kv_list_state.selected().is_some() => {
+                self.confirm_delete = true;
             }
             KeyCode::Char('r') => {
                 if let Some(agent) = &self.selected_agent {
@@ -317,7 +307,7 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
             .iter()
             .map(|a| {
                 let id_short = if a.id.len() > 12 {
-                    format!("{}\u{2026}", &a.id[..12])
+                    format!("{}\u{2026}", openfang_types::truncate_str(&a.id, 12))
                 } else {
                     a.id.clone()
                 };
@@ -405,7 +395,7 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
             .iter()
             .map(|kv| {
                 let val_display = if kv.value.len() > 40 {
-                    format!("{}\u{2026}", &kv.value[..39])
+                    format!("{}\u{2026}", openfang_types::truncate_str(&kv.value, 39))
                 } else {
                     kv.value.clone()
                 };
@@ -549,6 +539,9 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}\u{2026}", openfang_types::truncate_str(s, max.saturating_sub(1)))
+        format!(
+            "{}\u{2026}",
+            openfang_types::truncate_str(s, max.saturating_sub(1))
+        )
     }
 }

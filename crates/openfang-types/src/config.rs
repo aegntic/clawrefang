@@ -4,6 +4,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Deserialize a `Vec<String>` that tolerates both string and integer elements.
+///
+/// When channel configs are saved from the web dashboard, numeric IDs (e.g. Discord
+/// guild snowflakes, Telegram user IDs) are stored as TOML integers. This helper
+/// transparently converts integers back to strings so deserialization never fails.
+fn deserialize_string_or_int_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values: Vec<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Number(n) => n.to_string(),
+            other => other.to_string(),
+        })
+        .collect())
+}
+
 /// DM (direct message) policy for a channel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +52,30 @@ pub enum GroupPolicy {
     Ignore,
 }
 
+/// Prefix style applied to outbound agent messages on a channel.
+///
+/// When enabled, the channel bridge wraps the responding agent's reply with its
+/// name so end-users can tell which agent authored the message when multiple
+/// agents share the same channel. Default is `Off` to preserve existing
+/// behavior.
+///
+/// Platform-native identity (e.g. Slack per-message bot username override,
+/// Discord embed author field) is intentionally out of scope here and will be
+/// addressed in a follow-up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixStyle {
+    /// No prefix — byte-identical to pre-feature behavior.
+    #[default]
+    Off,
+    /// Plain bracketed name: `[agent-name] text`.
+    Bracket,
+    /// Bold bracketed name via markdown: `**[agent-name]** text`.
+    /// Renders bold on platforms that support markdown (Discord, Telegram
+    /// markdown mode, Slack mrkdwn treats it as bold too).
+    BoldBracket,
+}
+
 /// Output format hint for channel-specific message formatting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,7 +92,7 @@ pub enum OutputFormat {
 }
 
 /// Per-channel behavior overrides.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelOverrides {
     /// Model override (uses agent's default if None).
@@ -69,6 +113,34 @@ pub struct ChannelOverrides {
     pub usage_footer: Option<UsageFooterMode>,
     /// Typing indicator mode override.
     pub typing_mode: Option<TypingMode>,
+    /// Whether to send lifecycle emoji reactions (⏳🤔✅❌) on messages.
+    /// Defaults to true. Set to false to suppress automatic reactions (e.g. on Telegram).
+    #[serde(default = "default_true")]
+    pub lifecycle_reactions: bool,
+    /// Prefix outbound messages with the responding agent's name.
+    ///
+    /// Defaults to `PrefixStyle::Off` so enabling this feature is opt-in per
+    /// channel and existing configs keep their current output byte-for-byte.
+    #[serde(default)]
+    pub prefix_agent_name: PrefixStyle,
+}
+
+impl Default for ChannelOverrides {
+    fn default() -> Self {
+        Self {
+            model: None,
+            system_prompt: None,
+            dm_policy: DmPolicy::default(),
+            group_policy: GroupPolicy::default(),
+            rate_limit_per_user: 0,
+            threading: false,
+            output_format: None,
+            usage_footer: None,
+            typing_mode: None,
+            lifecycle_reactions: true,
+            prefix_agent_name: PrefixStyle::Off,
+        }
+    }
 }
 
 /// Controls what usage info appears in response footers.
@@ -132,7 +204,9 @@ pub enum SearchProvider {
     Perplexity,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Perplexity → DuckDuckGo).
+    /// SearXNG self-hosted search (no API key needed).
+    Searxng,
+    /// Auto-select based on available API keys (Tavily → Brave → Perplexity → Searxng → DuckDuckGo).
     #[default]
     Auto,
 }
@@ -151,6 +225,8 @@ pub struct WebConfig {
     pub tavily: TavilySearchConfig,
     /// Perplexity Search configuration.
     pub perplexity: PerplexitySearchConfig,
+    /// SearXNG Search configuration.
+    pub searxng: SearxngSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
 }
@@ -163,6 +239,7 @@ impl Default for WebConfig {
             brave: BraveSearchConfig::default(),
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
+            searxng: SearxngSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
@@ -240,6 +317,14 @@ impl Default for PerplexitySearchConfig {
     }
 }
 
+/// SearXNG self-hosted search configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearxngSearchConfig {
+    /// Base URL of the SearXNG instance (e.g., "https://search.example.com").
+    pub url: String,
+}
+
 /// Web fetch configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -252,6 +337,15 @@ pub struct WebFetchConfig {
     pub timeout_secs: u64,
     /// Enable HTML→Markdown readability extraction.
     pub readability: bool,
+    /// SSRF allowlist for self-hosted environments.
+    ///
+    /// Entries can be exact hostnames (`"n8n.local"`), wildcard domains
+    /// (`"*.olares.com"`), or CIDR ranges (`"10.0.0.0/8"`).
+    ///
+    /// Allowlisted hosts bypass the private-IP check but **never** bypass
+    /// cloud metadata endpoint blocking (169.254.169.254, metadata.google.internal, etc.).
+    #[serde(default)]
+    pub ssrf_allowed_hosts: Vec<String>,
 }
 
 impl Default for WebFetchConfig {
@@ -261,6 +355,7 @@ impl Default for WebFetchConfig {
             max_response_bytes: 10 * 1024 * 1024, // 10 MB
             timeout_secs: 30,
             readability: true,
+            ssrf_allowed_hosts: Vec::new(),
         }
     }
 }
@@ -269,6 +364,10 @@ impl Default for WebFetchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
+    /// Enable the built-in CDP browser tools (browser_navigate, browser_click,
+    /// etc.).  Set to `false` when using an external browser MCP server such as
+    /// CamoFox, which replaces these tools with its own set.
+    pub enabled: bool,
     /// Run browser in headless mode (no visible window).
     pub headless: bool,
     /// Viewport width in pixels.
@@ -281,24 +380,21 @@ pub struct BrowserConfig {
     pub idle_timeout_secs: u64,
     /// Maximum concurrent browser sessions.
     pub max_sessions: usize,
-    /// Python executable path (e.g., "python3" on Unix, "python" on Windows).
-    pub python_path: String,
+    /// Path to Chromium/Chrome binary. Auto-detected if None.
+    pub chromium_path: Option<String>,
 }
 
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             headless: true,
             viewport_width: 1280,
             viewport_height: 720,
             timeout_secs: 30,
             idle_timeout_secs: 300,
             max_sessions: 5,
-            python_path: if cfg!(windows) {
-                "python".to_string()
-            } else {
-                "python3".to_string()
-            },
+            chromium_path: None,
         }
     }
 }
@@ -386,6 +482,15 @@ pub struct FallbackProviderConfig {
     /// Base URL override (uses catalog default if None).
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Per-message subprocess turn timeout in seconds for this fallback.
+    ///
+    /// Forwarded to `DriverConfig.subprocess_timeout_secs` when this fallback
+    /// is constructed. Currently honored only by `provider = "claude-code"`;
+    /// other providers accept the field for forward-compatibility but ignore
+    /// it today. The `OPENFANG_SUBPROCESS_TIMEOUT_SECS` env var, if set, wins
+    /// over this field at driver-construction time.
+    #[serde(default)]
+    pub subprocess_timeout_secs: Option<u64>,
 }
 
 /// Text-to-speech configuration.
@@ -628,7 +733,12 @@ impl Default for VaultConfig {
 }
 
 /// Agent binding — routes specific channel/account/peer patterns to agents.
+///
+/// `deny_unknown_fields` so typos at the binding level (e.g. `match_rule` →
+/// `match_rules`) fail loudly at config-load instead of silently leaving the
+/// rule defaulted to "match everything".
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentBinding {
     /// Target agent name or ID.
     pub agent: String,
@@ -636,17 +746,90 @@ pub struct AgentBinding {
     pub match_rule: BindingMatchRule,
 }
 
+/// Lowercased channel-name strings whose adapters place a channel/conversation/
+/// room/space/chat ID directly in `ChannelMessage::sender.platform_id` (these
+/// adapters overload that field because it doubles as the send target).
+///
+/// Single source of truth shared between:
+/// - Config validation (warn the user when their `channel_id` binding targets
+///   an adapter that doesn't populate `ctx.channel_id`).
+/// - `ChannelMessage::channel_id()` in `openfang-channels::types` (routing-time
+///   accessor that reads from this list to decide where to source the ID).
+///
+/// Adapters not listed fall back to `metadata["channel_id"]` if present, then
+/// `None`. Hybrid adapters whose `platform_id` flips between channel and user
+/// based on `is_group` (IRC, Zulip) are intentionally excluded — a single
+/// channel-scoped binding would silently match DMs.
+///
+/// Compared against the lowercased `channel` string from `BindingMatchRule`
+/// or from `channel_type_str()` at routing time.
+pub const CHANNELS_WITH_PLATFORM_ID_AS_CHANNEL: &[&str] = &[
+    "discord",
+    "slack",
+    "telegram",
+    "matrix",
+    "mattermost",
+    "teams",
+    "webex",
+    "rocketchat",
+    "nextcloud",
+    "pumble",
+    "revolt",
+    "guilded",
+    "feishu",
+    // Feishu Intl region emits `Custom("lark")` from `feishu.rs` (region.as_str()
+    // returns "lark" when configured for international). Listed alongside
+    // "feishu" so both regional spellings resolve identically at routing and
+    // validation time.
+    "lark",
+    "keybase",
+    "google_chat",
+    "line",
+    "twist",
+    "flock",
+    "twitch",
+];
+
 /// Match rule for agent bindings. All specified (non-None) fields must match.
+///
+/// `#[serde(deny_unknown_fields)]` is intentional: a typo like `channnel_id` or
+/// `chan_id` would otherwise be silently dropped, producing a wide-open binding
+/// that matches every message. Failing loudly at config load is the safer default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BindingMatchRule {
     /// Channel type (e.g., "discord", "telegram", "slack").
+    #[serde(default)]
     pub channel: Option<String>,
     /// Specific account/bot ID within the channel.
+    #[serde(default)]
     pub account_id: Option<String>,
-    /// Peer/user ID for DM routing.
+    /// Peer/user ID. Matches `BindingContext::peer_id`, which the bridge
+    /// populates from `ChannelMessage::sender_user_id()` — i.e. the platform's
+    /// *user* identity (Discord user ID, Slack user ID, etc.).
+    ///
+    /// Note: the legacy `AgentRouter::resolve()` entry point (kept for tests
+    /// and any caller without bridge context) builds a synthetic context
+    /// where `peer_id` is filled from the raw `platform_user_id` argument. On
+    /// adapters that overload `platform_id` as the channel ID (Discord, Slack,
+    /// …), passing those callers a channel-scoped value will match here. New
+    /// code should route through `resolve_with_context` and a bridge-built
+    /// `BindingContext`. For platform-native channel/conversation matching,
+    /// use `channel_id` instead.
+    #[serde(default)]
     pub peer_id: Option<String>,
     /// Guild/server ID (Discord/Slack).
+    #[serde(default)]
     pub guild_id: Option<String>,
+    /// Channel/conversation ID — the per-channel routing dimension.
+    /// On Discord this is the channel/thread ID; on Slack it is the conversation
+    /// ID (`C…`/`D…`/`G…`); on Telegram it is the chat ID; on IRC it is the
+    /// channel name. Bridges populate this from the message's channel/conversation
+    /// identifier so bindings can route by room independent of which user posted.
+    /// Pair with `channel` to disambiguate across platforms (channel IDs are
+    /// not portable).
+    #[serde(default)]
+    pub channel_id: Option<String>,
     /// Role-based routing (user must have at least one).
     #[serde(default)]
     pub roles: Vec<String>,
@@ -655,9 +838,15 @@ pub struct BindingMatchRule {
 impl BindingMatchRule {
     /// Calculate specificity score for binding priority ordering.
     /// Higher = more specific = checked first.
+    ///
+    /// Weights: peer_id and channel_id are both 8 so a binding that combines
+    /// both (a specific user in a specific room) cleanly outranks either alone.
     pub fn specificity(&self) -> u32 {
         let mut score = 0u32;
         if self.peer_id.is_some() {
+            score += 8;
+        }
+        if self.channel_id.is_some() {
             score += 8;
         }
         if self.guild_id.is_some() {
@@ -750,16 +939,19 @@ impl Default for CanvasConfig {
 #[serde(rename_all = "lowercase")]
 pub enum ExecSecurityMode {
     /// Block all shell execution.
+    #[serde(alias = "none", alias = "disabled")]
     Deny,
     /// Only allow commands in safe_bins or allowed_commands.
     #[default]
+    #[serde(alias = "restricted")]
     Allowlist,
     /// Allow all commands (unsafe, dev only).
+    #[serde(alias = "allow", alias = "all", alias = "unrestricted")]
     Full,
 }
 
 /// Shell/exec security policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ExecPolicy {
     /// Security mode: "deny" blocks all, "allowlist" only allows listed,
@@ -777,6 +969,25 @@ pub struct ExecPolicy {
     /// produce no stdout/stderr output for this duration. Default: 30.
     #[serde(default = "default_no_output_timeout")]
     pub no_output_timeout_secs: u64,
+    /// Environment variables to forward from the OpenFang process into
+    /// `shell_exec` subprocesses.
+    ///
+    /// By default, subprocesses run with `env_clear()` and only receive a
+    /// minimal safe set (PATH, HOME, TMPDIR, LANG, TERM, etc. — see
+    /// `subprocess_sandbox::SAFE_ENV_VARS`). Anything else — including
+    /// user-defined variables present in the container/host environment —
+    /// is stripped. This list lets operators explicitly re-add specific
+    /// variables to the subprocess environment.
+    ///
+    /// Each entry is an env var name. A single entry of `"*"` forwards
+    /// every variable present in the parent process. Use with care — `*`
+    /// will leak API keys and other secrets into child processes.
+    ///
+    /// Aliases `env_passthrough` and `env_allowlist` are accepted for
+    /// backwards compatibility with users who configured these names
+    /// before the field existed (issue #1169).
+    #[serde(default, alias = "env_passthrough", alias = "env_allowlist")]
+    pub shell_env_passthrough: Vec<String>,
 }
 
 fn default_no_output_timeout() -> u64 {
@@ -798,6 +1009,7 @@ impl Default for ExecPolicy {
             timeout_secs: 30,
             max_output_bytes: 100 * 1024,
             no_output_timeout_secs: default_no_output_timeout(),
+            shell_env_passthrough: Vec::new(),
         }
     }
 }
@@ -920,6 +1132,14 @@ impl Default for ThinkingConfig {
 }
 
 /// Top-level kernel configuration.
+///
+/// `deny_unknown_fields` is intentionally *not* applied here. Strict-field
+/// validation is scoped to bindings (`AgentBinding` + `BindingMatchRule`),
+/// where silent no-op routing is the failure mode worth catching loudly.
+/// Adding it to the top-level kernel struct would also reject forward-compat
+/// keys, downstream-fork-only keys, and "I'm trying out a future field early"
+/// workflows — a wider behavior change than this PR's mandate. If we want it
+/// later, it ships as its own decision.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KernelConfig {
@@ -1043,9 +1263,88 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Provider API key env var overrides (provider ID → env var name).
+    /// For custom/unknown providers, maps the provider name to the environment
+    /// variable holding the API key. e.g. `nvidia = "NVIDIA_API_KEY"`.
+    /// If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.
+    #[serde(default)]
+    pub provider_api_keys: HashMap<String, String>,
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
+    /// Dashboard authentication (username/password login).
+    #[serde(default)]
+    pub auth: AuthConfig,
+    /// Directory for auto-loading workflow JSON files on startup.
+    /// Defaults to `~/.openfang/workflows`. Set to empty string to disable.
+    #[serde(default)]
+    pub workflows_dir: Option<PathBuf>,
+    /// Heartbeat monitor settings.
+    #[serde(default)]
+    pub heartbeat: HeartbeatSettings,
+    /// Per-skill runtime config (from `[skills.<skill-name>]` sections).
+    ///
+    /// When a skill declares a `config:` section in its SKILL.md frontmatter,
+    /// the loader resolves each variable via:
+    /// 1. this map (outer key = skill name, inner key = var name),
+    /// 2. env var named by the var's `env` field,
+    /// 3. the var's `default`.
+    ///
+    /// Example `~/.openfang/config.toml`:
+    /// ```toml
+    /// [skills.github-repo-helper]
+    /// github_token = "ghp_..."
+    /// default_branch = "develop"
+    /// ```
+    #[serde(default)]
+    pub skills: HashMap<String, HashMap<String, String>>,
+}
+
+/// Heartbeat monitor settings exposed in `[heartbeat]` config section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatSettings {
+    /// Seconds of inactivity before a reactive agent is marked as unresponsive.
+    /// Default: 180. Set higher to prevent idle hands from being marked as crashed.
+    #[serde(default = "default_heartbeat_timeout")]
+    pub default_timeout_secs: u64,
+}
+
+fn default_heartbeat_timeout() -> u64 {
+    180
+}
+
+impl Default for HeartbeatSettings {
+    fn default() -> Self {
+        Self {
+            default_timeout_secs: default_heartbeat_timeout(),
+        }
+    }
+}
+
+/// Dashboard authentication (username/password login).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Enable username/password authentication for the dashboard.
+    pub enabled: bool,
+    /// Admin username.
+    pub username: String,
+    /// Argon2id password hash (PHC string format).
+    /// Generate with: openfang auth hash-password
+    pub password_hash: String,
+    /// Session token lifetime in hours (default: 168 = 7 days).
+    pub session_ttl_hours: u64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            username: "admin".to_string(),
+            password_hash: String::new(),
+            session_ttl_hours: 168,
+        }
+    }
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1083,6 +1382,10 @@ pub struct BudgetConfig {
     pub max_monthly_usd: f64,
     /// Alert threshold as a fraction (0.0 - 1.0). Trigger warnings at this % of any limit.
     pub alert_threshold: f64,
+    /// Default per-agent hourly token limit override. When set (> 0), all agents
+    /// will be overridden to this value. Set to 0 to keep each agent's own limit.
+    /// Use this to globally raise or lower the token budget for all agents.
+    pub default_max_llm_tokens_per_hour: u64,
 }
 
 impl Default for BudgetConfig {
@@ -1092,6 +1395,7 @@ impl Default for BudgetConfig {
             max_daily_usd: 0.0,
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
+            default_max_llm_tokens_per_hour: 0,
         }
     }
 }
@@ -1116,6 +1420,10 @@ pub struct McpServerConfigEntry {
     /// Environment variables to pass through (e.g., ["GITHUB_PERSONAL_ACCESS_TOKEN"]).
     #[serde(default)]
     pub env: Vec<String>,
+    /// Extra HTTP headers for SSE / Streamable-HTTP transports.
+    /// Each entry is `"Header-Name: value"` (e.g., `"Authorization: Bearer <token>"`).
+    #[serde(default)]
+    pub headers: Vec<String>,
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -1134,6 +1442,8 @@ pub enum McpTransportEntry {
     },
     /// HTTP Server-Sent Events.
     Sse { url: String },
+    /// Streamable HTTP (MCP 2025-03-26+).
+    Http { url: String },
 }
 
 /// A2A (Agent-to-Agent) protocol configuration.
@@ -1167,9 +1477,21 @@ fn default_language() -> String {
     "en".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_auto_thread() -> String {
+    "false".to_string()
+}
+
+fn default_thread_ttl() -> u64 {
+    24
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
-        let home_dir = dirs_next_home().join(".openfang");
+        let home_dir = openfang_home_dir();
         Self {
             data_dir: home_dir.join("data"),
             home_dir,
@@ -1212,7 +1534,12 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_api_keys: HashMap::new(),
             oauth: OAuthConfig::default(),
+            auth: AuthConfig::default(),
+            workflows_dir: None,
+            heartbeat: HeartbeatSettings::default(),
+            skills: HashMap::new(),
         }
     }
 }
@@ -1223,6 +1550,27 @@ impl KernelConfig {
         self.workspaces_dir
             .clone()
             .unwrap_or_else(|| self.home_dir.join("workspaces"))
+    }
+
+    /// Resolve the API key env var name for a provider.
+    ///
+    /// Checks: 1) explicit `provider_api_keys` mapping, 2) `auth_profiles` first entry,
+    /// 3) convention `{PROVIDER_UPPER}_API_KEY`.
+    pub fn resolve_api_key_env(&self, provider: &str) -> String {
+        // 1. Explicit mapping in [provider_api_keys]
+        if let Some(env_var) = self.provider_api_keys.get(provider) {
+            return env_var.clone();
+        }
+        // 2. Auth profiles (first profile by priority)
+        if let Some(profiles) = self.auth_profiles.get(provider) {
+            let mut sorted: Vec<_> = profiles.iter().collect();
+            sorted.sort_by_key(|p| p.priority);
+            if let Some(best) = sorted.first() {
+                return best.api_key_env.clone();
+            }
+        }
+        // 3. Convention: NVIDIA → NVIDIA_API_KEY
+        format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"))
     }
 }
 
@@ -1305,13 +1653,26 @@ impl std::fmt::Debug for KernelConfig {
                 &format!("{} provider(s)", self.auth_profiles.len()),
             )
             .field("thinking", &self.thinking.is_some())
+            .field(
+                "provider_api_keys",
+                &format!("{} mapping(s)", self.provider_api_keys.len()),
+            )
+            .field("auth", &format!("enabled={}", self.auth.enabled))
+            .field("skills", &format!("{} skill config(s)", self.skills.len()))
             .finish()
     }
 }
 
-/// Fallback home directory resolution.
-fn dirs_next_home() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(std::env::temp_dir)
+/// Resolve the OpenFang home directory.
+///
+/// Priority: `OPENFANG_HOME` env var > `~/.openfang`.
+fn openfang_home_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("OPENFANG_HOME") {
+        return PathBuf::from(home);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".openfang")
 }
 
 /// Default LLM model configuration.
@@ -1326,6 +1687,15 @@ pub struct DefaultModelConfig {
     pub api_key_env: String,
     /// Optional base URL override.
     pub base_url: Option<String>,
+    /// Per-message subprocess turn timeout in seconds for the default model.
+    ///
+    /// Forwarded to `DriverConfig.subprocess_timeout_secs` when the primary
+    /// driver is constructed. Currently honored only by
+    /// `provider = "claude-code"`; other providers accept the field for
+    /// forward-compatibility but ignore it today. The
+    /// `OPENFANG_SUBPROCESS_TIMEOUT_SECS` env var, if set, wins over this
+    /// field at driver-construction time.
+    pub subprocess_timeout_secs: Option<u64>,
 }
 
 impl Default for DefaultModelConfig {
@@ -1335,6 +1705,7 @@ impl Default for DefaultModelConfig {
             model: "claude-sonnet-4-20250514".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             base_url: None,
+            subprocess_timeout_secs: None,
         }
     }
 }
@@ -1360,10 +1731,24 @@ pub struct MemoryConfig {
     /// How often to run memory consolidation (hours). 0 = disabled.
     #[serde(default = "default_consolidation_interval")]
     pub consolidation_interval_hours: u64,
+    /// Memory backend: "sqlite" (default) or "http".
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+    /// HTTP memory API URL (when backend = "http").
+    /// e.g., "http://127.0.0.1:5500"
+    #[serde(default)]
+    pub http_url: Option<String>,
+    /// Env var name holding the HTTP memory API bearer token.
+    #[serde(default)]
+    pub http_token_env: Option<String>,
 }
 
 fn default_consolidation_interval() -> u64 {
     24
+}
+
+fn default_memory_backend() -> String {
+    "sqlite".to_string()
 }
 
 impl Default for MemoryConfig {
@@ -1376,6 +1761,9 @@ impl Default for MemoryConfig {
             embedding_provider: None,
             embedding_api_key_env: None,
             consolidation_interval_hours: default_consolidation_interval(),
+            backend: default_memory_backend(),
+            http_url: None,
+            http_token_env: None,
         }
     }
 }
@@ -1501,8 +1889,10 @@ pub struct ChannelsConfig {
     // Wave 5 — Niche & differentiating channels
     /// Mumble text chat configuration (None = disabled).
     pub mumble: Option<MumbleConfig>,
-    /// DingTalk robot configuration (None = disabled).
+    /// DingTalk robot configuration — webhook mode (None = disabled).
     pub dingtalk: Option<DingTalkConfig>,
+    /// DingTalk Stream mode — long-lived WebSocket (None = disabled).
+    pub dingtalk_stream: Option<DingTalkStreamConfig>,
     /// Discourse forum configuration (None = disabled).
     pub discourse: Option<DiscourseConfig>,
     /// Gitter streaming configuration (None = disabled).
@@ -1515,6 +1905,10 @@ pub struct ChannelsConfig {
     pub webhook: Option<WebhookConfig>,
     /// LinkedIn messaging configuration (None = disabled).
     pub linkedin: Option<LinkedInConfig>,
+    /// WeCom/WeChat Work configuration (None = disabled).
+    pub wecom: Option<WeComConfig>,
+    /// MQTT pub/sub configuration (None = disabled).
+    pub mqtt: Option<MqttConfig>,
 }
 
 /// Telegram channel adapter configuration.
@@ -1524,11 +1918,28 @@ pub struct TelegramConfig {
     /// Env var name holding the bot token (NOT the token itself).
     pub bot_token_env: String,
     /// Telegram user IDs allowed to interact (empty = allow all).
-    pub allowed_users: Vec<i64>,
+    /// Accepts strings for consistency; numeric TOML integers are coerced to strings.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_users: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Polling interval in seconds.
     pub poll_interval_secs: u64,
+    /// Custom Telegram Bot API base URL for proxies or mirrors.
+    /// Defaults to `https://api.telegram.org` when not set.
+    #[serde(default)]
+    pub api_url: Option<String>,
+    /// Default chat ID for outgoing messages when no recipient is specified.
+    /// Allows channel_send(channel="telegram", message="...") without a recipient.
+    #[serde(default)]
+    pub default_chat_id: Option<String>,
+    /// Forum topic routing: maps `message_thread_id` to an agent name.
+    /// When a message arrives inside a Telegram forum topic whose thread id is
+    /// listed here, the bridge dispatches it to the named agent instead of the
+    /// default. Threads not listed fall back to `default_agent`.
+    /// Issue #780.
+    #[serde(default)]
+    pub thread_routes: HashMap<i64, String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -1541,6 +1952,9 @@ impl Default for TelegramConfig {
             allowed_users: vec![],
             default_agent: None,
             poll_interval_secs: 1,
+            api_url: None,
+            default_chat_id: None,
+            thread_routes: HashMap::new(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -1553,11 +1967,31 @@ pub struct DiscordConfig {
     /// Env var name holding the bot token (NOT the token itself).
     pub bot_token_env: String,
     /// Guild (server) IDs allowed to interact (empty = allow all).
-    pub allowed_guilds: Vec<u64>,
+    /// Accepts strings for consistency with other channel configs.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_guilds: Vec<String>,
+    /// User IDs allowed to interact (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub allowed_users: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
-    /// Gateway intents bitmask (default: 33280 = GUILD_MESSAGES | MESSAGE_CONTENT).
+    /// Gateway intents bitmask (default: 37376 = GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT).
     pub intents: u64,
+    /// Ignore messages from other bots (default: true).
+    /// Set to false to allow bot-to-bot interactions in multi-agent setups.
+    #[serde(default = "default_true")]
+    pub ignore_bots: bool,
+    /// Default channel ID for outgoing messages when no recipient is specified.
+    #[serde(default)]
+    pub default_channel_id: Option<String>,
+    /// Channel IDs that respond without requiring @mention (free response mode).
+    /// In these channels, the bot responds to all group messages without needing to be mentioned.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub free_response_channels: Vec<String>,
+    /// Auto-thread behavior: "true" (always create thread), "false" (never), "smart" (only when @mentioned).
+    /// Default: "false"
+    #[serde(default = "default_auto_thread")]
+    pub auto_thread: String,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -1568,8 +2002,13 @@ impl Default for DiscordConfig {
         Self {
             bot_token_env: "DISCORD_BOT_TOKEN".to_string(),
             allowed_guilds: vec![],
+            allowed_users: vec![],
             default_agent: None,
-            intents: 33280,
+            intents: 37376,
+            ignore_bots: true,
+            default_channel_id: None,
+            free_response_channels: vec![],
+            auto_thread: "false".to_string(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -1584,12 +2023,22 @@ pub struct SlackConfig {
     /// Env var name holding the bot token (xoxb-) for REST API.
     pub bot_token_env: String,
     /// Channel IDs allowed to interact (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Automatically reply to follow-up messages in threads where bot was mentioned.
+    #[serde(default = "default_true")]
+    pub auto_thread_reply: bool,
+    /// Hours to track a thread after last interaction (default: 24).
+    #[serde(default = "default_thread_ttl")]
+    pub thread_ttl_hours: u64,
+    /// Whether to unfurl (expand previews for) links in messages (default: true).
+    #[serde(default = "default_true")]
+    pub unfurl_links: bool,
 }
 
 impl Default for SlackConfig {
@@ -1600,6 +2049,9 @@ impl Default for SlackConfig {
             allowed_channels: vec![],
             default_agent: None,
             overrides: ChannelOverrides::default(),
+            auto_thread_reply: true,
+            thread_ttl_hours: 24,
+            unfurl_links: true,
         }
     }
 }
@@ -1620,6 +2072,7 @@ pub struct WhatsAppConfig {
     /// When set, outgoing messages are routed through the gateway instead of Cloud API.
     pub gateway_url_env: String,
     /// Allowed phone numbers (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -1652,6 +2105,7 @@ pub struct SignalConfig {
     /// Registered phone number.
     pub phone_number: String,
     /// Allowed phone numbers (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -1682,10 +2136,21 @@ pub struct MatrixConfig {
     pub user_id: String,
     /// Env var name holding the access token.
     pub access_token_env: String,
+    /// Env var name holding the MSC2918 refresh token (optional).
+    ///
+    /// When set, the adapter auto-recovers from `M_UNKNOWN_TOKEN` 401 responses
+    /// by calling `POST /_matrix/client/v3/refresh`. Required for matrix.org
+    /// since the 2025-04-07 migration to MAS (Matrix Authentication Service).
+    #[serde(default)]
+    pub refresh_token_env: Option<String>,
     /// Room IDs to listen in (empty = all joined rooms).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_rooms: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Whether to auto-accept room invites (default: false).
+    #[serde(default)]
+    pub auto_accept_invites: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -1697,8 +2162,10 @@ impl Default for MatrixConfig {
             homeserver_url: "https://matrix.org".to_string(),
             user_id: String::new(),
             access_token_env: "MATRIX_ACCESS_TOKEN".to_string(),
+            refresh_token_env: None,
             allowed_rooms: vec![],
             default_agent: None,
+            auto_accept_invites: false,
             overrides: ChannelOverrides::default(),
         }
     }
@@ -1723,8 +2190,10 @@ pub struct EmailConfig {
     /// Poll interval in seconds.
     pub poll_interval_secs: u64,
     /// IMAP folders to monitor.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub folders: Vec<String>,
     /// Only process emails from these senders (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_senders: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -1762,6 +2231,7 @@ pub struct TeamsConfig {
     /// Port for the incoming webhook.
     pub webhook_port: u16,
     /// Allowed tenant IDs (empty = allow all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_tenants: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -1792,6 +2262,7 @@ pub struct MattermostConfig {
     /// Env var name holding the bot token.
     pub token_env: String,
     /// Allowed channel IDs (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -1825,6 +2296,7 @@ pub struct IrcConfig {
     /// Env var name holding the server password (optional).
     pub password_env: Option<String>,
     /// Channels to join (e.g., `["#openfang", "#general"]`).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub channels: Vec<String>,
     /// Use TLS (requires tokio-native-tls).
     pub use_tls: bool,
@@ -1857,6 +2329,7 @@ pub struct GoogleChatConfig {
     /// Env var name holding the service account JSON key.
     pub service_account_env: String,
     /// Space IDs to listen in.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub space_ids: Vec<String>,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
@@ -1886,6 +2359,7 @@ pub struct TwitchConfig {
     /// Env var name holding the OAuth token.
     pub oauth_token_env: String,
     /// Twitch channels to join (without #).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub channels: Vec<String>,
     /// Bot nickname.
     pub nick: String,
@@ -1919,6 +2393,7 @@ pub struct RocketChatConfig {
     /// User ID for the bot.
     pub user_id: String,
     /// Allowed channel IDs (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -1951,6 +2426,7 @@ pub struct ZulipConfig {
     /// Env var name holding the API key.
     pub api_key_env: String,
     /// Streams to listen in.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub streams: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -1985,6 +2461,7 @@ pub struct XmppConfig {
     /// XMPP server port.
     pub port: u16,
     /// MUC rooms to join.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub rooms: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2109,6 +2586,7 @@ pub struct RedditConfig {
     /// Env var name holding the bot password.
     pub password_env: String,
     /// Subreddits to monitor.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub subreddits: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2186,7 +2664,21 @@ impl Default for BlueskyConfig {
     }
 }
 
+/// Feishu inbound event receive mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FeishuMode {
+    /// Receive events via HTTP webhook callback.
+    Webhook,
+    /// Receive events via WebSocket long connection.
+    #[default]
+    Websocket,
+}
+
 /// Feishu/Lark Open Platform channel adapter configuration.
+///
+/// Supports both Feishu (China domestic, `open.feishu.cn`) and Lark
+/// (International, `open.larksuite.com`) via the `region` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeishuConfig {
@@ -2194,8 +2686,21 @@ pub struct FeishuConfig {
     pub app_id: String,
     /// Env var name holding the app secret.
     pub app_secret_env: String,
+    /// Inbound receive mode (`webhook` or `websocket`).
+    pub mode: FeishuMode,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Region: "cn" for Feishu (open.feishu.cn), "intl" for Lark (open.larksuite.com).
+    pub region: String,
+    /// Webhook URL path (default: "/feishu/webhook").
+    pub webhook_path: String,
+    /// Optional verification token for webhook event validation.
+    pub verification_token: Option<String>,
+    /// Env var name holding the encrypt key for event decryption (AES-256-CBC).
+    pub encrypt_key_env: Option<String>,
+    /// Bot name aliases for group-chat @mention detection.
+    #[serde(default)]
+    pub bot_names: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2208,7 +2713,104 @@ impl Default for FeishuConfig {
         Self {
             app_id: String::new(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
+            mode: FeishuMode::Websocket,
             webhook_port: 8453,
+            region: "cn".to_string(),
+            webhook_path: "/feishu/webhook".to_string(),
+            verification_token: None,
+            encrypt_key_env: None,
+            bot_names: Vec::new(),
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// WeCom/WeChat Work channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeComConfig {
+    /// WeCom corp ID.
+    pub corp_id: String,
+    /// WeCom application agent ID.
+    pub agent_id: String,
+    /// Env var name holding the application secret.
+    pub secret_env: String,
+    /// Port for the incoming webhook.
+    pub webhook_port: u16,
+    /// Callback verification token (optional, for URL verification).
+    pub token: Option<String>,
+    /// Encoding AES key for callback (optional, for encrypted mode).
+    pub encoding_aes_key: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for WeComConfig {
+    fn default() -> Self {
+        Self {
+            corp_id: String::new(),
+            agent_id: String::new(),
+            secret_env: "WECOM_SECRET".to_string(),
+            webhook_port: 8454,
+            token: None,
+            encoding_aes_key: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// MQTT channel adapter configuration.
+///
+/// Provides a generic MQTT pub/sub interface for IoT and messaging integration.
+/// Supports standard MQTT 3.1.1/5.0 brokers with optional TLS and authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MqttConfig {
+    /// MQTT broker URL (e.g., `"tcp://broker.hivemq.com:1883"` or `"ssl://broker.example.com:8883"`).
+    pub broker_url: String,
+    /// Client identifier (empty = auto-generated).
+    pub client_id: String,
+    /// Topic to subscribe to for incoming messages.
+    pub subscribe_topic: String,
+    /// Topic to publish responses to (empty = same as subscribe_topic).
+    pub publish_topic: String,
+    /// Env var name holding the username (optional).
+    pub username_env: String,
+    /// Env var name holding the password (optional).
+    pub password_env: String,
+    /// Use TLS/SSL connection.
+    pub use_tls: bool,
+    /// Keep-alive interval in seconds.
+    pub keep_alive_secs: u16,
+    /// Clean session flag.
+    pub clean_session: bool,
+    /// QoS level for subscriptions (0, 1, or 2).
+    pub qos: u8,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            broker_url: "tcp://broker.hivemq.com:1883".to_string(),
+            client_id: String::new(),
+            subscribe_topic: "openfang/inbox".to_string(),
+            publish_topic: String::new(),
+            username_env: "MQTT_USERNAME".to_string(),
+            password_env: "MQTT_PASSWORD".to_string(),
+            use_tls: false,
+            keep_alive_secs: 60,
+            clean_session: true,
+            qos: 1,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2221,8 +2823,13 @@ impl Default for FeishuConfig {
 pub struct RevoltConfig {
     /// Env var name holding the bot token.
     pub bot_token_env: String,
-    /// Revolt API URL.
+    /// Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).
     pub api_url: String,
+    /// Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).
+    pub ws_url: String,
+    /// Restrict to specific channel IDs (empty = all channels the bot is in).
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2235,6 +2842,8 @@ impl Default for RevoltConfig {
         Self {
             bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
             api_url: "https://api.revolt.chat".to_string(),
+            ws_url: "wss://ws.revolt.chat".to_string(),
+            allowed_channels: Vec::new(),
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2252,6 +2861,7 @@ pub struct NextcloudConfig {
     /// Env var name holding the auth token.
     pub token_env: String,
     /// Room tokens to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_rooms: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2279,6 +2889,7 @@ pub struct GuildedConfig {
     /// Env var name holding the bot token.
     pub bot_token_env: String,
     /// Server IDs to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub server_ids: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2307,6 +2918,7 @@ pub struct KeybaseConfig {
     /// Env var name holding the paper key.
     pub paperkey_env: String,
     /// Team names to listen in (empty = all DMs).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_teams: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2363,6 +2975,7 @@ pub struct NostrConfig {
     /// Env var name holding the private key (nsec or hex).
     pub private_key_env: String,
     /// Relay URLs to connect to.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub relays: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2389,6 +3002,7 @@ pub struct WebexConfig {
     /// Env var name holding the bot token.
     pub bot_token_env: String,
     /// Room IDs to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_rooms: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2469,6 +3083,7 @@ pub struct TwistConfig {
     /// Workspace ID.
     pub workspace_id: String,
     /// Channel IDs to listen in (empty = all).
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2555,6 +3170,39 @@ impl Default for DingTalkConfig {
     }
 }
 
+/// DingTalk Stream channel adapter configuration.
+///
+/// Uses the DingTalk Stream Mode (WebSocket long-connection) instead of
+/// the legacy webhook approach. Requires an Enterprise Internal App with
+/// Stream Mode enabled in the DingTalk Open Platform console.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DingTalkStreamConfig {
+    /// Env var holding the App Key (client_id).
+    pub app_key_env: String,
+    /// Env var holding the App Secret (client_secret).
+    pub app_secret_env: String,
+    /// Robot code for outbound batchSend (often same as app_key).
+    pub robot_code_env: String,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for DingTalkStreamConfig {
+    fn default() -> Self {
+        Self {
+            app_key_env: "DINGTALK_APP_KEY".to_string(),
+            app_secret_env: "DINGTALK_APP_SECRET".to_string(),
+            robot_code_env: "DINGTALK_ROBOT_CODE".to_string(),
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
 /// Discourse forum channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2566,6 +3214,7 @@ pub struct DiscourseConfig {
     /// API username.
     pub api_username: String,
     /// Category slugs to monitor.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub categories: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -3070,6 +3719,26 @@ impl KernelConfig {
                 ));
             }
         }
+        if let Some(ref ds) = self.channels.dingtalk_stream {
+            if std::env::var(&ds.app_key_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "DingTalk Stream configured but {} is not set",
+                    ds.app_key_env
+                ));
+            }
+            if std::env::var(&ds.app_secret_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                warnings.push(format!(
+                    "DingTalk Stream configured but {} is not set",
+                    ds.app_secret_env
+                ));
+            }
+        }
         if let Some(ref dc) = self.channels.discourse {
             if std::env::var(&dc.api_key_env)
                 .unwrap_or_default()
@@ -3159,7 +3828,50 @@ impl KernelConfig {
                     ));
                 }
             }
+            SearchProvider::Searxng => {
+                if self.web.searxng.url.is_empty() {
+                    warnings.push(
+                        "Searxng search selected but searxng.url is not configured".to_string(),
+                    );
+                }
+            }
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
+        }
+
+        // --- Binding validation (channel_id) ---
+        // Use the shared allowlist (CHANNELS_WITH_PLATFORM_ID_AS_CHANNEL) so this
+        // validation cannot drift from the routing-time accessor in
+        // ChannelMessage::channel_id(). Adapters not on the list may still
+        // populate ctx.channel_id via metadata["channel_id"], but we cannot
+        // detect that statically — so we warn conservatively and document the
+        // metadata escape hatch in docs/channel-adapters.md.
+        for (idx, binding) in self.bindings.iter().enumerate() {
+            let rule = &binding.match_rule;
+            if let Some(ref cid) = rule.channel_id {
+                match rule.channel.as_deref() {
+                    None => {
+                        warnings.push(format!(
+                            "Binding #{} (agent='{}') sets channel_id='{}' without channel; \
+                             channel IDs are not portable across platforms. Pair with channel = \"discord\" (or similar).",
+                            idx, binding.agent, cid
+                        ));
+                    }
+                    Some(ch) => {
+                        let ch_lower = ch.to_lowercase();
+                        if !CHANNELS_WITH_PLATFORM_ID_AS_CHANNEL
+                            .iter()
+                            .any(|p| *p == ch_lower)
+                        {
+                            warnings.push(format!(
+                                "Binding #{} (agent='{}') sets channel_id='{}' for channel='{}', \
+                                 but the {} adapter does not populate ctx.channel_id from sender.platform_id; \
+                                 this binding will only match if the adapter writes channel_id into message metadata.",
+                                idx, binding.agent, cid, ch, ch
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         // --- Production bounds validation ---
@@ -3222,11 +3934,149 @@ mod tests {
     }
 
     #[test]
+    fn test_binding_match_rule_deny_unknown_fields_rejects_typo() {
+        // Typo (`channnel_id` with three n's) should fail to parse rather than
+        // silently producing a no-op rule that matches every message.
+        let toml_input = r#"
+            channel = "discord"
+            channnel_id = "12345"
+        "#;
+        let result: Result<BindingMatchRule, _> = toml::from_str(toml_input);
+        assert!(
+            result.is_err(),
+            "expected deny_unknown_fields to reject typo'd field, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_agent_binding_deny_unknown_fields() {
+        // A typo at the AgentBinding level (`match_rules` plural instead of
+        // `match_rule`) must fail config load — silent default would make the
+        // binding a wildcard.
+        let toml_str = r#"
+            agent = "x"
+            [match_rules]
+            channel = "discord"
+        "#;
+        let result: Result<AgentBinding, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "expected deny_unknown_fields rejection, got Ok"
+        );
+    }
+
+    #[test]
+    fn test_validate_warns_channel_id_without_channel() {
+        let mut config = KernelConfig::default();
+        config.bindings.push(AgentBinding {
+            agent: "ghost".to_string(),
+            match_rule: BindingMatchRule {
+                channel_id: Some("99999".to_string()),
+                ..Default::default()
+            },
+        });
+        let warnings = config.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("channel_id") && w.contains("without channel")),
+            "expected channel_id-without-channel warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_warns_channel_id_for_unsupported_adapter() {
+        // Reddit's `platform_id` is the post author, not a subreddit; no
+        // per-conversation channel_id, so the binding can never match.
+        let mut config = KernelConfig::default();
+        config.bindings.push(AgentBinding {
+            agent: "ghost".to_string(),
+            match_rule: BindingMatchRule {
+                channel: Some("reddit".to_string()),
+                channel_id: Some("r/something".to_string()),
+                ..Default::default()
+            },
+        });
+        let warnings = config.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("reddit") && w.contains("does not populate")),
+            "expected unsupported-adapter warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_no_warning_for_supported_adapters() {
+        // Discord, Slack, Telegram all overload platform_id as the channel ID —
+        // these must not warn.
+        for ch in ["discord", "slack", "telegram"] {
+            let mut config = KernelConfig::default();
+            config.bindings.push(AgentBinding {
+                agent: "ok".to_string(),
+                match_rule: BindingMatchRule {
+                    channel: Some(ch.to_string()),
+                    channel_id: Some("X".to_string()),
+                    ..Default::default()
+                },
+            });
+            let warnings = config.validate();
+            assert!(
+                !warnings.iter().any(|w| w.contains("does not populate")),
+                "did not expect channel_id-coverage warning for {}, got: {:?}",
+                ch,
+                warnings
+            );
+        }
+    }
+
+    #[test]
     fn test_discord_config_defaults() {
         let dc = DiscordConfig::default();
         assert_eq!(dc.bot_token_env, "DISCORD_BOT_TOKEN");
         assert!(dc.allowed_guilds.is_empty());
-        assert_eq!(dc.intents, 33280);
+        assert_eq!(dc.intents, 37376);
+        assert!(dc.ignore_bots);
+    }
+
+    #[test]
+    fn test_discord_config_ignore_bots_deserialization() {
+        let toml_str = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+            ignore_bots = false
+        "#;
+        let dc: DiscordConfig = toml::from_str(toml_str).unwrap();
+        assert!(!dc.ignore_bots);
+
+        // Default (field omitted) should be true
+        let toml_str2 = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+        "#;
+        let dc2: DiscordConfig = toml::from_str(toml_str2).unwrap();
+        assert!(dc2.ignore_bots);
+    }
+
+    #[test]
+    fn test_discord_config_free_response_channels_deserialization() {
+        // Test with free_response_channels as list of strings
+        let toml_str = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+            free_response_channels = ["123456789", "987654321"]
+        "#;
+        let dc: DiscordConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(dc.free_response_channels.len(), 2);
+        assert_eq!(dc.free_response_channels[0], "123456789");
+        assert_eq!(dc.free_response_channels[1], "987654321");
+
+        // Test default (empty list)
+        let toml_str2 = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+        "#;
+        let dc2: DiscordConfig = toml::from_str(toml_str2).unwrap();
+        assert!(dc2.free_response_channels.is_empty());
     }
 
     #[test]
@@ -3321,6 +4171,9 @@ mod tests {
         let mx = MatrixConfig::default();
         assert_eq!(mx.homeserver_url, "https://matrix.org");
         assert_eq!(mx.access_token_env, "MATRIX_ACCESS_TOKEN");
+        // MSC2918 refresh token env defaults to None; operators opt in via
+        // `refresh_token_env = "MATRIX_REFRESH_TOKEN"` in config.toml.
+        assert!(mx.refresh_token_env.is_none());
         assert!(mx.allowed_rooms.is_empty());
     }
 
@@ -3470,6 +4323,7 @@ mod tests {
         assert!(!ov.threading);
         assert!(ov.output_format.is_none());
         assert!(ov.model.is_none());
+        assert!(ov.lifecycle_reactions);
     }
 
     #[test]
@@ -3479,6 +4333,7 @@ mod tests {
             model: "llama3.2:latest".to_string(),
             api_key_env: String::new(),
             base_url: None,
+            subprocess_timeout_secs: None,
         };
         let json = serde_json::to_string(&fb).unwrap();
         let back: FallbackProviderConfig = serde_json::from_str(&json).unwrap();
@@ -3486,6 +4341,7 @@ mod tests {
         assert_eq!(back.model, "llama3.2:latest");
         assert!(back.api_key_env.is_empty());
         assert!(back.base_url.is_none());
+        assert!(back.subprocess_timeout_secs.is_none());
     }
 
     #[test]
@@ -3512,6 +4368,57 @@ mod tests {
         assert_eq!(config.fallback_providers[1].provider, "groq");
     }
 
+    /// `subprocess_timeout_secs` round-trips through TOML on both
+    /// `[default_model]` and `[[fallback_providers]]`. This is the contract
+    /// the kernel relies on to honor operator-set timeouts at driver
+    /// construction time.
+    #[test]
+    fn test_subprocess_timeout_secs_in_toml() {
+        let toml_str = r#"
+            [default_model]
+            provider = "claude-code"
+            model = "claude-sonnet-4-20250514"
+            api_key_env = "ANTHROPIC_API_KEY"
+            subprocess_timeout_secs = 600
+
+            [[fallback_providers]]
+            provider = "claude-code"
+            model = "claude-haiku-4-20250514"
+            subprocess_timeout_secs = 180
+
+            [[fallback_providers]]
+            provider = "ollama"
+            model = "llama3.2:latest"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.default_model.subprocess_timeout_secs, Some(600));
+        assert_eq!(
+            config.fallback_providers[0].subprocess_timeout_secs,
+            Some(180)
+        );
+        // Omitted on the second fallback → None (backward compat).
+        assert_eq!(config.fallback_providers[1].subprocess_timeout_secs, None);
+    }
+
+    /// Configs that predate this field must still parse cleanly — ensures
+    /// the rollout doesn't break anyone with an existing config.toml.
+    #[test]
+    fn test_subprocess_timeout_secs_omitted_defaults_to_none() {
+        let toml_str = r#"
+            [default_model]
+            provider = "anthropic"
+            model = "claude-sonnet-4-20250514"
+            api_key_env = "ANTHROPIC_API_KEY"
+
+            [[fallback_providers]]
+            provider = "ollama"
+            model = "llama3.2:latest"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.default_model.subprocess_timeout_secs, None);
+        assert_eq!(config.fallback_providers[0].subprocess_timeout_secs, None);
+    }
+
     #[test]
     fn test_channel_overrides_serde() {
         let ov = ChannelOverrides {
@@ -3529,6 +4436,25 @@ mod tests {
         assert_eq!(back.rate_limit_per_user, 10);
         assert!(back.threading);
         assert_eq!(back.output_format, Some(OutputFormat::TelegramHtml));
+        // lifecycle_reactions defaults to true via ..Default::default()
+        assert!(back.lifecycle_reactions);
+    }
+
+    #[test]
+    fn test_channel_overrides_lifecycle_reactions_disabled() {
+        let json = r#"{"lifecycle_reactions": false}"#;
+        let ov: ChannelOverrides = serde_json::from_str(json).unwrap();
+        assert!(!ov.lifecycle_reactions);
+        // Other fields should have their defaults
+        assert_eq!(ov.dm_policy, DmPolicy::Respond);
+        assert!(ov.model.is_none());
+    }
+
+    #[test]
+    fn test_channel_overrides_lifecycle_reactions_missing_defaults_true() {
+        let json = r#"{}"#;
+        let ov: ChannelOverrides = serde_json::from_str(json).unwrap();
+        assert!(ov.lifecycle_reactions);
     }
 
     #[test]
@@ -3575,5 +4501,201 @@ mod tests {
         assert_eq!(config.browser.max_sessions, browser_sessions);
         assert_eq!(config.web.fetch.max_response_bytes, fetch_bytes);
         assert_eq!(config.web.fetch.timeout_secs, fetch_timeout);
+    }
+
+    #[test]
+    fn test_feishu_mode_defaults_to_websocket() {
+        let toml_str = r#"
+            [channels.feishu]
+            app_id = "cli_test"
+            app_secret_env = "FEISHU_APP_SECRET"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let feishu = config.channels.feishu.unwrap();
+        assert_eq!(feishu.mode, FeishuMode::Websocket);
+    }
+
+    #[test]
+    fn test_feishu_mode_parses_websocket() {
+        let toml_str = r#"
+            [channels.feishu]
+            app_id = "cli_test"
+            app_secret_env = "FEISHU_APP_SECRET"
+            mode = "websocket"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let feishu = config.channels.feishu.unwrap();
+        assert_eq!(feishu.mode, FeishuMode::Websocket);
+    }
+
+    #[test]
+    fn test_resolve_api_key_env_convention() {
+        let config = KernelConfig::default();
+        // Unknown provider falls back to convention
+        assert_eq!(config.resolve_api_key_env("nvidia"), "NVIDIA_API_KEY");
+        assert_eq!(config.resolve_api_key_env("my-custom"), "MY_CUSTOM_API_KEY");
+    }
+
+    #[test]
+    fn test_resolve_api_key_env_explicit_mapping() {
+        let mut config = KernelConfig::default();
+        config
+            .provider_api_keys
+            .insert("nvidia".to_string(), "NIM_KEY".to_string());
+        // Explicit mapping takes precedence over convention
+        assert_eq!(config.resolve_api_key_env("nvidia"), "NIM_KEY");
+    }
+
+    #[test]
+    fn test_resolve_api_key_env_auth_profiles() {
+        let mut config = KernelConfig::default();
+        config.auth_profiles.insert(
+            "nvidia".to_string(),
+            vec![AuthProfile {
+                name: "primary".to_string(),
+                api_key_env: "NVIDIA_PRIMARY_KEY".to_string(),
+                priority: 0,
+            }],
+        );
+        // Auth profiles take precedence over convention (but not explicit mapping)
+        assert_eq!(config.resolve_api_key_env("nvidia"), "NVIDIA_PRIMARY_KEY");
+    }
+
+    #[test]
+    fn test_resolve_api_key_env_explicit_over_auth_profile() {
+        let mut config = KernelConfig::default();
+        config
+            .provider_api_keys
+            .insert("nvidia".to_string(), "NIM_KEY".to_string());
+        config.auth_profiles.insert(
+            "nvidia".to_string(),
+            vec![AuthProfile {
+                name: "primary".to_string(),
+                api_key_env: "NVIDIA_PRIMARY_KEY".to_string(),
+                priority: 0,
+            }],
+        );
+        // Explicit mapping wins over auth profiles
+        assert_eq!(config.resolve_api_key_env("nvidia"), "NIM_KEY");
+    }
+
+    #[test]
+    fn test_provider_api_keys_toml_roundtrip() {
+        let toml_str = r#"
+            [provider_api_keys]
+            nvidia = "NVIDIA_NIM_KEY"
+            azure = "AZURE_OPENAI_KEY"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider_api_keys.len(), 2);
+        assert_eq!(
+            config.provider_api_keys.get("nvidia").unwrap(),
+            "NVIDIA_NIM_KEY"
+        );
+        assert_eq!(
+            config.provider_api_keys.get("azure").unwrap(),
+            "AZURE_OPENAI_KEY"
+        );
+    }
+
+    #[test]
+    fn test_slack_config_unfurl_links_defaults_true() {
+        let config: SlackConfig = toml::from_str("").unwrap();
+        assert!(config.unfurl_links);
+    }
+
+    #[test]
+    fn test_slack_config_unfurl_links_explicit_false() {
+        let config: SlackConfig = toml::from_str("unfurl_links = false").unwrap();
+        assert!(!config.unfurl_links);
+    }
+
+    #[test]
+    fn test_slack_config_unfurl_links_explicit_true() {
+        let config: SlackConfig = toml::from_str("unfurl_links = true").unwrap();
+        assert!(config.unfurl_links);
+    }
+
+    #[test]
+    fn test_heartbeat_settings_default() {
+        let settings = HeartbeatSettings::default();
+        assert_eq!(settings.default_timeout_secs, 180);
+    }
+
+    #[test]
+    fn test_heartbeat_settings_deserialization() {
+        let toml_str = r#"default_timeout_secs = 600"#;
+        let settings: HeartbeatSettings = toml::from_str(toml_str).unwrap();
+        assert_eq!(settings.default_timeout_secs, 600);
+    }
+
+    #[test]
+    fn test_heartbeat_settings_omitted_uses_default() {
+        // When [heartbeat] section is omitted entirely, KernelConfig should use defaults
+        let toml_str = r#"
+            log_level = "debug"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.heartbeat.default_timeout_secs, 180);
+    }
+
+    #[test]
+    fn test_heartbeat_settings_in_kernel_config() {
+        let toml_str = r#"
+            [heartbeat]
+            default_timeout_secs = 300
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.heartbeat.default_timeout_secs, 300);
+    }
+
+    // ── Issue #1169: shell_env_passthrough on ExecPolicy ──────────────
+
+    #[test]
+    fn test_exec_policy_passthrough_default_empty() {
+        let policy = ExecPolicy::default();
+        assert!(policy.shell_env_passthrough.is_empty());
+    }
+
+    #[test]
+    fn test_exec_policy_passthrough_deserializes() {
+        let toml_str = r#"
+mode = "full"
+shell_env_passthrough = ["TZ", "GOG_ACCOUNT"]
+"#;
+        let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
+        assert_eq!(policy.shell_env_passthrough, vec!["TZ", "GOG_ACCOUNT"]);
+    }
+
+    #[test]
+    fn test_exec_policy_passthrough_alias_env_passthrough() {
+        // Backwards-compat alias from the issue body (#1169).
+        let toml_str = r#"
+mode = "full"
+env_passthrough = ["TZ", "GOG_ACCOUNT"]
+"#;
+        let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
+        assert_eq!(policy.shell_env_passthrough, vec!["TZ", "GOG_ACCOUNT"]);
+    }
+
+    #[test]
+    fn test_exec_policy_passthrough_alias_env_allowlist() {
+        // Backwards-compat alias from the issue body (#1169).
+        let toml_str = r#"
+mode = "full"
+env_allowlist = ["TZ", "HOME"]
+"#;
+        let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
+        assert_eq!(policy.shell_env_passthrough, vec!["TZ", "HOME"]);
+    }
+
+    #[test]
+    fn test_exec_policy_passthrough_wildcard() {
+        let toml_str = r#"
+mode = "full"
+shell_env_passthrough = ["*"]
+"#;
+        let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
+        assert_eq!(policy.shell_env_passthrough, vec!["*"]);
     }
 }

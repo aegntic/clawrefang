@@ -22,6 +22,7 @@ pub struct AgentInfo {
 
 /// Handle to kernel operations, passed into the agent loop so agents
 /// can interact with each other via tools.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait KernelHandle: Send + Sync {
     /// Spawn a new agent from a TOML manifest string.
@@ -41,6 +42,15 @@ pub trait KernelHandle: Send + Sync {
 
     /// Kill an agent by ID.
     fn kill_agent(&self, agent_id: &str) -> Result<(), String>;
+
+    /// Activate (wake up) an inactive agent by ID, flipping its state to Running.
+    /// Used by orchestrator agents to dispatch work to currently inactive agents
+    /// (Suspended, Crashed, or never-started). Terminated agents cannot be revived.
+    /// Returns the agent's name on success.
+    fn activate_agent(&self, agent_id: &str) -> Result<String, String> {
+        let _ = agent_id;
+        Err("Agent activation not available".to_string())
+    }
 
     /// Store a value in shared memory (cross-agent accessible).
     fn memory_store(&self, key: &str, value: serde_json::Value) -> Result<(), String>;
@@ -139,6 +149,16 @@ pub trait KernelHandle: Send + Sync {
         Err("Hands system not available".to_string())
     }
 
+    /// Install a Hand from TOML content.
+    async fn hand_install(
+        &self,
+        toml_content: &str,
+        skill_content: &str,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (toml_content, skill_content);
+        Err("Hands system not available".to_string())
+    }
+
     /// Activate a Hand — spawns a specialized autonomous agent.
     async fn hand_activate(
         &self,
@@ -173,15 +193,64 @@ pub trait KernelHandle: Send + Sync {
     }
 
     /// Send a message to a user on a named channel adapter (e.g., "email", "telegram").
+    /// When `thread_id` is provided, the message is sent as a thread reply.
     /// Returns a confirmation string on success.
+    /// Get the default recipient for a channel (e.g. default_chat_id for Telegram).
+    async fn get_channel_default_recipient(&self, channel: &str) -> Option<String> {
+        let _ = channel;
+        None
+    }
+
     async fn send_channel_message(
         &self,
         channel: &str,
         recipient: &str,
         message: &str,
+        thread_id: Option<&str>,
     ) -> Result<String, String> {
-        let _ = (channel, recipient, message);
+        let _ = (channel, recipient, message, thread_id);
         Err("Channel send not available".to_string())
+    }
+
+    /// Send media content (image/file) to a user on a named channel adapter.
+    /// `media_type` is "image" or "file", `media_url` is the URL, `caption` is optional text.
+    /// When `thread_id` is provided, the media is sent as a thread reply.
+    async fn send_channel_media(
+        &self,
+        channel: &str,
+        recipient: &str,
+        media_type: &str,
+        media_url: &str,
+        caption: Option<&str>,
+        filename: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (
+            channel, recipient, media_type, media_url, caption, filename, thread_id,
+        );
+        Err("Channel media send not available".to_string())
+    }
+
+    /// Send a local file (raw bytes) to a user on a named channel adapter.
+    /// Used by the `channel_send` tool when `file_path` is provided.
+    /// When `thread_id` is provided, the file is sent as a thread reply.
+    async fn send_channel_file_data(
+        &self,
+        channel: &str,
+        recipient: &str,
+        data: Vec<u8>,
+        filename: &str,
+        mime_type: &str,
+        thread_id: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (channel, recipient, data, filename, mime_type, thread_id);
+        Err("Channel file data send not available".to_string())
+    }
+
+    /// Refresh an agent's last_active timestamp without changing any other state.
+    /// Called by the agent loop before long LLM calls to prevent heartbeat false-positives.
+    fn touch_agent(&self, agent_id: &str) {
+        let _ = agent_id;
     }
 
     /// Spawn an agent with capability inheritance enforcement.

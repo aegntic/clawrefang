@@ -27,7 +27,10 @@ impl AnthropicDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(crate::USER_AGENT)
+                .build()
+                .unwrap_or_default(),
         }
     }
 }
@@ -81,6 +84,22 @@ enum ApiContentBlock {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    /// Extended-thinking block echoed back to the API.
+    ///
+    /// Anthropic requires the original `signature` to be returned verbatim
+    /// alongside the `thinking` text on subsequent turns; otherwise the
+    /// model loses its prior reasoning state. Without `signature` the API
+    /// rejects the block, so we omit thinking blocks that arrive without
+    /// one (e.g. legacy sessions saved before this field was tracked).
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
+    /// Redacted (encrypted) thinking block echoed back to the API.
+    ///
+    /// Anthropic returns these when the model decides to hide reasoning;
+    /// the `data` blob is opaque and MUST be echoed verbatim on the next
+    /// turn or the API rejects the resubmitted history.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -117,8 +136,21 @@ enum ResponseContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    /// Extended-thinking block from Anthropic. The `signature` is opaque
+    /// to us but MUST be persisted and echoed back on the next request,
+    /// otherwise the API rejects the resubmitted thinking block and the
+    /// model loses its reasoning state.
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    /// Redacted (encrypted) thinking block. The `data` blob is opaque to
+    /// us and must be persisted as-is so we can echo it back on the next
+    /// request — Anthropic rejects history that strips these blocks.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,11 +173,24 @@ struct ApiErrorDetail {
 /// Accumulator for content blocks during streaming.
 enum ContentBlockAccum {
     Text(String),
-    Thinking(String),
+    /// Extended thinking — text plus an opaque signature delivered as
+    /// `signature_delta` events (or as a single field on `content_block_stop`
+    /// for older API versions).  The signature is required to round-trip
+    /// thinking blocks on subsequent turns.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
     ToolUse {
         id: String,
         name: String,
         input_json: String,
+    },
+    /// Redacted (encrypted) thinking block streamed from Anthropic.
+    /// The opaque `data` blob arrives on `content_block_start` and must be
+    /// persisted so the next turn can echo it back verbatim.
+    RedactedThinking {
+        data: String,
     },
 }
 
@@ -365,10 +410,10 @@ impl LlmDriver for AnthropicDriver {
                     let mut event_type = String::new();
                     let mut data = String::new();
                     for line in event_text.lines() {
-                        if let Some(et) = line.strip_prefix("event: ") {
-                            event_type = et.to_string();
-                        } else if let Some(d) = line.strip_prefix("data: ") {
-                            data = d.to_string();
+                        if let Some(et) = line.strip_prefix("event:") {
+                            event_type = et.trim_start().to_string();
+                        } else if let Some(d) = line.strip_prefix("data:") {
+                            data = d.trim_start().to_string();
                         }
                     }
 
@@ -409,18 +454,36 @@ impl LlmDriver for AnthropicDriver {
                                     });
                                 }
                                 "thinking" => {
-                                    blocks.push(ContentBlockAccum::Thinking(String::new()));
+                                    // Some API versions ship the signature on
+                                    // content_block_start instead of as a delta.
+                                    let initial_sig =
+                                        block["signature"].as_str().unwrap_or("").to_string();
+                                    blocks.push(ContentBlockAccum::Thinking {
+                                        thinking: String::new(),
+                                        signature: initial_sig,
+                                    });
+                                }
+                                "redacted_thinking" => {
+                                    // Anthropic delivers redacted_thinking
+                                    // as a single block_start with the opaque
+                                    // `data` blob (no delta events). Store it
+                                    // verbatim so we can echo it back on the
+                                    // next request — API rejects history
+                                    // that strips redacted_thinking blocks.
+                                    let data = block["data"].as_str().unwrap_or("").to_string();
+                                    blocks.push(ContentBlockAccum::RedactedThinking { data });
                                 }
                                 _ => {}
                             }
                         }
                         "content_block_delta" => {
+                            let block_idx = json["index"].as_u64().unwrap_or(0) as usize;
                             let delta = &json["delta"];
                             match delta["type"].as_str().unwrap_or("") {
                                 "text_delta" => {
                                     if let Some(text) = delta["text"].as_str() {
                                         if let Some(ContentBlockAccum::Text(ref mut t)) =
-                                            blocks.last_mut()
+                                            blocks.get_mut(block_idx)
                                         {
                                             t.push_str(text);
                                         }
@@ -436,7 +499,7 @@ impl LlmDriver for AnthropicDriver {
                                         if let Some(ContentBlockAccum::ToolUse {
                                             ref mut input_json,
                                             ..
-                                        }) = blocks.last_mut()
+                                        }) = blocks.get_mut(block_idx)
                                         {
                                             input_json.push_str(partial);
                                         }
@@ -448,11 +511,33 @@ impl LlmDriver for AnthropicDriver {
                                     }
                                 }
                                 "thinking_delta" => {
-                                    if let Some(thinking) = delta["thinking"].as_str() {
-                                        if let Some(ContentBlockAccum::Thinking(ref mut t)) =
-                                            blocks.last_mut()
+                                    if let Some(t) = delta["thinking"].as_str() {
+                                        if let Some(ContentBlockAccum::Thinking {
+                                            thinking: ref mut buf,
+                                            ..
+                                        }) = blocks.get_mut(block_idx)
                                         {
-                                            t.push_str(thinking);
+                                            buf.push_str(t);
+                                        }
+                                        // Forward to UI as ThinkingDelta event so dashboards can show reasoning.
+                                        let _ = tx
+                                            .send(StreamEvent::ThinkingDelta {
+                                                text: t.to_string(),
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "signature_delta" => {
+                                    // Anthropic streams the thinking signature
+                                    // as its own delta type; concatenate any
+                                    // partial pieces into the accumulator.
+                                    if let Some(sig) = delta["signature"].as_str() {
+                                        if let Some(ContentBlockAccum::Thinking {
+                                            ref mut signature,
+                                            ..
+                                        }) = blocks.get_mut(block_idx)
+                                        {
+                                            signature.push_str(sig);
                                         }
                                     }
                                 }
@@ -460,14 +545,15 @@ impl LlmDriver for AnthropicDriver {
                             }
                         }
                         "content_block_stop" => {
+                            let block_idx = json["index"].as_u64().unwrap_or(0) as usize;
                             if let Some(ContentBlockAccum::ToolUse {
                                 id,
                                 name,
                                 input_json,
-                            }) = blocks.last()
+                            }) = blocks.get(block_idx)
                             {
-                                let input: serde_json::Value =
-                                    serde_json::from_str(input_json).unwrap_or_default();
+                                let input: serde_json::Value = serde_json::from_str(input_json)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
                                 let _ = tx
                                     .send(StreamEvent::ToolUseEnd {
                                         id: id.clone(),
@@ -502,24 +588,51 @@ impl LlmDriver for AnthropicDriver {
             for block in blocks {
                 match block {
                     ContentBlockAccum::Text(text) => {
-                        content.push(ContentBlock::Text { text });
+                        content.push(ContentBlock::Text {
+                            text,
+                            provider_metadata: None,
+                        });
                     }
-                    ContentBlockAccum::Thinking(thinking) => {
-                        content.push(ContentBlock::Thinking { thinking });
+                    ContentBlockAccum::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        // Drop empty thinking blocks (rare, but happens if the
+                        // stream is interrupted mid-block).  Always keep the
+                        // signature when present — it's required to round-trip.
+                        if !thinking.is_empty() || !signature.is_empty() {
+                            content.push(ContentBlock::Thinking {
+                                thinking,
+                                signature: if signature.is_empty() {
+                                    None
+                                } else {
+                                    Some(signature)
+                                },
+                                provider_metadata: Some(serde_json::json!({
+                                    "format": "anthropic_extended_thinking"
+                                })),
+                            });
+                        }
                     }
                     ContentBlockAccum::ToolUse {
                         id,
                         name,
                         input_json,
                     } => {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&input_json).unwrap_or_default();
+                        let input: serde_json::Value = serde_json::from_str(&input_json)
+                            .unwrap_or_else(|_| serde_json::json!({}));
                         content.push(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
+                            provider_metadata: None,
                         });
                         tool_calls.push(ToolCall { id, name, input });
+                    }
+                    ContentBlockAccum::RedactedThinking { data } => {
+                        if !data.is_empty() {
+                            content.push(ContentBlock::RedactedThinking { data });
+                        }
                     }
                 }
             }
@@ -543,6 +656,28 @@ impl LlmDriver for AnthropicDriver {
     }
 }
 
+/// Ensure a `serde_json::Value` is a JSON object (dictionary).
+///
+/// The Anthropic API requires `tool_use.input` to be a JSON object, never a
+/// string, null, or other scalar.  This helper handles:
+///  - `Value::Object` → returned as-is
+///  - `Value::String` → attempt to parse as JSON; if the result is an object, use it
+///  - anything else (Null, Number, Bool, Array) → empty object `{}`
+fn ensure_object(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(_) => v.clone(),
+        serde_json::Value::String(s) => {
+            // The input may have been double-serialized (stored as a JSON string).
+            // Try to parse it back into a Value.
+            match serde_json::from_str::<serde_json::Value>(s) {
+                Ok(parsed) if parsed.is_object() => parsed,
+                _ => serde_json::json!({}),
+            }
+        }
+        _ => serde_json::json!({}),
+    }
+}
+
 /// Convert an OpenFang Message to an Anthropic API message.
 fn convert_message(msg: &Message) -> ApiMessage {
     let role = match msg.role {
@@ -557,7 +692,7 @@ fn convert_message(msg: &Message) -> ApiMessage {
             let api_blocks: Vec<ApiContentBlock> = blocks
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::Text { text } => {
+                    ContentBlock::Text { text, .. } => {
                         Some(ApiContentBlock::Text { text: text.clone() })
                     }
                     ContentBlock::Image { media_type, data } => Some(ApiContentBlock::Image {
@@ -567,21 +702,55 @@ fn convert_message(msg: &Message) -> ApiMessage {
                             data: data.clone(),
                         },
                     }),
-                    ContentBlock::ToolUse { id, name, input } => Some(ApiContentBlock::ToolUse {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => Some(ApiContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
-                        input: input.clone(),
+                        input: ensure_object(input),
                     }),
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
                         is_error,
+                        ..
                     } => Some(ApiContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
                         content: content.clone(),
                         is_error: *is_error,
                     }),
-                    ContentBlock::Thinking { .. } => None,
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                        ..
+                    } => {
+                        // Anthropic's extended-thinking spec requires the
+                        // verbatim `signature` to accompany any thinking block
+                        // resubmitted in conversation history. Without one,
+                        // the API rejects the request, so we silently drop
+                        // legacy thinking blocks (saved before signature
+                        // tracking) instead of round-tripping them.
+                        signature.as_ref().and_then(|sig| {
+                            if sig.is_empty() {
+                                None
+                            } else {
+                                Some(ApiContentBlock::Thinking {
+                                    thinking: thinking.clone(),
+                                    signature: sig.clone(),
+                                })
+                            }
+                        })
+                    }
+                    ContentBlock::RedactedThinking { data } => {
+                        // Echo the encrypted blob verbatim. Anthropic
+                        // rejects history that drops redacted_thinking
+                        // blocks, so always include them on resubmission.
+                        if data.is_empty() {
+                            None
+                        } else {
+                            Some(ApiContentBlock::RedactedThinking { data: data.clone() })
+                        }
+                    }
                     ContentBlock::Unknown => None,
                 })
                 .collect();
@@ -603,18 +772,34 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
     for block in api.content {
         match block {
             ResponseContentBlock::Text { text } => {
-                content.push(ContentBlock::Text { text });
+                content.push(ContentBlock::Text {
+                    text,
+                    provider_metadata: None,
+                });
             }
             ResponseContentBlock::ToolUse { id, name, input } => {
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
+                    provider_metadata: None,
                 });
                 tool_calls.push(ToolCall { id, name, input });
             }
-            ResponseContentBlock::Thinking { thinking } => {
-                content.push(ContentBlock::Thinking { thinking });
+            ResponseContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                content.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                    provider_metadata: Some(serde_json::json!({
+                        "format": "anthropic_extended_thinking"
+                    })),
+                });
+            }
+            ResponseContentBlock::RedactedThinking { data } => {
+                content.push(ContentBlock::RedactedThinking { data });
             }
         }
     }
@@ -674,5 +859,328 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "web_search");
         assert_eq!(response.usage.total(), 150);
+    }
+
+    #[test]
+    fn test_ensure_object_from_object() {
+        let obj = serde_json::json!({"key": "value"});
+        assert_eq!(ensure_object(&obj), obj);
+    }
+
+    #[test]
+    fn test_ensure_object_from_string() {
+        // Simulates double-serialized input (stored as JSON string)
+        let stringified = serde_json::Value::String(r#"{"query": "rust"}"#.to_string());
+        let result = ensure_object(&stringified);
+        assert_eq!(result, serde_json::json!({"query": "rust"}));
+    }
+
+    #[test]
+    fn test_ensure_object_from_null() {
+        let null = serde_json::Value::Null;
+        assert_eq!(ensure_object(&null), serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_ensure_object_from_non_object_string() {
+        // A string that parses to a non-object JSON value
+        let s = serde_json::Value::String("42".to_string());
+        assert_eq!(ensure_object(&s), serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_ensure_object_from_invalid_json_string() {
+        let s = serde_json::Value::String("not json at all".to_string());
+        assert_eq!(ensure_object(&s), serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_convert_message_normalizes_tool_input() {
+        // Simulate a ToolUse block with a stringified JSON input (legacy session data)
+        let msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "tu-1".to_string(),
+                name: "web_search".to_string(),
+                input: serde_json::Value::String(r#"{"query": "test"}"#.to_string()),
+                provider_metadata: None,
+            }]),
+            ..Default::default()
+        };
+        let api_msg = convert_message(&msg);
+        if let ApiContent::Blocks(blocks) = api_msg.content {
+            match &blocks[0] {
+                ApiContentBlock::ToolUse { input, .. } => {
+                    assert!(input.is_object(), "input should be an object, got: {input}");
+                    assert_eq!(input["query"], "test");
+                }
+                _ => panic!("Expected ToolUse block"),
+            }
+        } else {
+            panic!("Expected Blocks content");
+        }
+    }
+
+    /// Issue #1098: Anthropic extended-thinking blocks must round-trip
+    /// through the driver — the inbound response carries a `signature` that
+    /// MUST be echoed verbatim on the next request, otherwise the API
+    /// rejects the resubmitted thinking block and the model loses prior
+    /// reasoning state.
+    #[test]
+    fn test_thinking_block_signature_round_trip() {
+        // Step 1: API delivers a thinking block with signature
+        let api_response = ApiResponse {
+            content: vec![
+                ResponseContentBlock::Thinking {
+                    thinking: "Let me carefully consider this problem...".to_string(),
+                    signature: Some("WaUjzkypQ2mUEVM36O2TxuC".to_string()),
+                },
+                ResponseContentBlock::Text {
+                    text: "The answer is 42.".to_string(),
+                },
+            ],
+            stop_reason: "end_turn".to_string(),
+            usage: ApiUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+            },
+        };
+        let response = convert_response(api_response);
+        assert_eq!(response.content.len(), 2);
+
+        // Step 2: Verify the signature reached the ContentBlock
+        let thinking_block = &response.content[0];
+        match thinking_block {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+                ..
+            } => {
+                assert_eq!(thinking, "Let me carefully consider this problem...");
+                assert_eq!(signature.as_deref(), Some("WaUjzkypQ2mUEVM36O2TxuC"));
+            }
+            _ => panic!("expected Thinking content block"),
+        }
+
+        // Step 3: Now feed the assistant turn back into the driver as if
+        // it were prior conversation history (next user turn). The signature
+        // must survive into the outbound API request.
+        let assistant_msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(response.content.clone()),
+            ..Default::default()
+        };
+        let api_msg = convert_message(&assistant_msg);
+        let blocks = match api_msg.content {
+            ApiContent::Blocks(b) => b,
+            _ => panic!("expected Blocks content"),
+        };
+
+        // The Thinking block must appear in the outbound payload with its signature.
+        let mut found_thinking = false;
+        for block in &blocks {
+            if let ApiContentBlock::Thinking {
+                thinking,
+                signature,
+            } = block
+            {
+                assert_eq!(thinking, "Let me carefully consider this problem...");
+                assert_eq!(signature, "WaUjzkypQ2mUEVM36O2TxuC");
+                found_thinking = true;
+            }
+        }
+        assert!(
+            found_thinking,
+            "outbound API request must include the thinking block with signature"
+        );
+
+        // Step 4: Verify on-the-wire JSON shape (`type=thinking`, `signature` present).
+        let outbound_json = serde_json::to_value(&blocks).unwrap();
+        let arr = outbound_json.as_array().unwrap();
+        let thinking_json = arr
+            .iter()
+            .find(|v| v["type"] == "thinking")
+            .expect("thinking block in JSON");
+        assert_eq!(thinking_json["signature"], "WaUjzkypQ2mUEVM36O2TxuC");
+        assert_eq!(
+            thinking_json["thinking"],
+            "Let me carefully consider this problem..."
+        );
+    }
+
+    /// Legacy thinking blocks saved before signature tracking should NOT
+    /// be replayed — Anthropic rejects thinking blocks without signatures.
+    #[test]
+    fn test_thinking_block_without_signature_dropped_outbound() {
+        let assistant_msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "old reasoning from before sig tracking".to_string(),
+                    signature: None,
+                    provider_metadata: None,
+                },
+                ContentBlock::Text {
+                    text: "Hello.".to_string(),
+                    provider_metadata: None,
+                },
+            ]),
+            ..Default::default()
+        };
+        let api_msg = convert_message(&assistant_msg);
+        let blocks = match api_msg.content {
+            ApiContent::Blocks(b) => b,
+            _ => panic!("expected Blocks content"),
+        };
+        // The legacy thinking block must be dropped (no sig = API would 400).
+        for block in &blocks {
+            assert!(
+                !matches!(block, ApiContentBlock::Thinking { .. }),
+                "thinking block without signature must be dropped"
+            );
+        }
+        // The text part is still preserved.
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, ApiContentBlock::Text { .. })));
+    }
+
+    /// Streaming path: signature_delta events accumulate into the final block.
+    #[test]
+    fn test_thinking_block_serde_with_signature_field() {
+        // Verify the API response wire format is parsed correctly.
+        let json = serde_json::json!({
+            "type": "thinking",
+            "thinking": "step 1, step 2",
+            "signature": "abc123"
+        });
+        let block: ResponseContentBlock = serde_json::from_value(json).unwrap();
+        match block {
+            ResponseContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "step 1, step 2");
+                assert_eq!(signature.as_deref(), Some("abc123"));
+            }
+            _ => panic!("expected Thinking response block"),
+        }
+    }
+
+    /// Issue #1148 — Anthropic `redacted_thinking` blocks must survive the
+    /// full driver round-trip. The opaque `data` blob is required verbatim
+    /// on resubmission; dropping or mutating it causes the API to reject
+    /// the assistant turn on the next request.
+    #[test]
+    fn test_redacted_thinking_round_trip() {
+        // Step 1: API delivers a response with a redacted_thinking block.
+        let api_response = ApiResponse {
+            content: vec![
+                ResponseContentBlock::RedactedThinking {
+                    data: "EncRyPt3D_BLO8".to_string(),
+                },
+                ResponseContentBlock::Text {
+                    text: "The answer is 42.".to_string(),
+                },
+            ],
+            stop_reason: "end_turn".to_string(),
+            usage: ApiUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+            },
+        };
+        let response = convert_response(api_response);
+        assert_eq!(response.content.len(), 2);
+
+        // Step 2: The opaque blob must reach the ContentBlock layer.
+        match &response.content[0] {
+            ContentBlock::RedactedThinking { data } => {
+                assert_eq!(data, "EncRyPt3D_BLO8");
+            }
+            other => panic!("expected RedactedThinking content block, got {other:?}"),
+        }
+
+        // Step 3: Resubmit the assistant turn as conversation history.
+        let assistant_msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(response.content.clone()),
+            ..Default::default()
+        };
+        let api_msg = convert_message(&assistant_msg);
+        let blocks = match api_msg.content {
+            ApiContent::Blocks(b) => b,
+            _ => panic!("expected Blocks content"),
+        };
+
+        // The redacted_thinking block must appear in the outbound payload.
+        let mut found_redacted = false;
+        for block in &blocks {
+            if let ApiContentBlock::RedactedThinking { data } = block {
+                assert_eq!(data, "EncRyPt3D_BLO8");
+                found_redacted = true;
+            }
+        }
+        assert!(
+            found_redacted,
+            "outbound API request must include the redacted_thinking block"
+        );
+
+        // Step 4: On-the-wire JSON shape (`type=redacted_thinking`, `data` present).
+        let outbound_json = serde_json::to_value(&blocks).unwrap();
+        let arr = outbound_json.as_array().unwrap();
+        let redacted_json = arr
+            .iter()
+            .find(|v| v["type"] == "redacted_thinking")
+            .expect("redacted_thinking block in JSON");
+        assert_eq!(redacted_json["data"], "EncRyPt3D_BLO8");
+    }
+
+    /// API response wire format for `redacted_thinking` is parsed correctly.
+    #[test]
+    fn test_redacted_thinking_serde() {
+        let json = serde_json::json!({
+            "type": "redacted_thinking",
+            "data": "opaque_blob_xyz"
+        });
+        let block: ResponseContentBlock = serde_json::from_value(json).unwrap();
+        match block {
+            ResponseContentBlock::RedactedThinking { data } => {
+                assert_eq!(data, "opaque_blob_xyz");
+            }
+            _ => panic!("expected RedactedThinking response block"),
+        }
+    }
+
+    /// Empty redacted_thinking blocks (e.g. interrupted stream) must be
+    /// dropped on outbound to avoid sending malformed history.
+    #[test]
+    fn test_redacted_thinking_empty_dropped_outbound() {
+        let assistant_msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::RedactedThinking {
+                    data: String::new(),
+                },
+                ContentBlock::Text {
+                    text: "Hello.".to_string(),
+                    provider_metadata: None,
+                },
+            ]),
+            ..Default::default()
+        };
+        let api_msg = convert_message(&assistant_msg);
+        let blocks = match api_msg.content {
+            ApiContent::Blocks(b) => b,
+            _ => panic!("expected Blocks content"),
+        };
+        for block in &blocks {
+            assert!(
+                !matches!(block, ApiContentBlock::RedactedThinking { .. }),
+                "empty redacted_thinking block must be dropped"
+            );
+        }
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, ApiContentBlock::Text { .. })));
     }
 }

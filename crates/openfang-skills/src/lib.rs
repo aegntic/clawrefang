@@ -9,6 +9,8 @@
 
 pub mod bundled;
 pub mod clawhub;
+pub mod config_injection;
+pub mod installer;
 pub mod loader;
 pub mod marketplace;
 pub mod openclaw_compat;
@@ -35,12 +37,16 @@ pub enum SkillError {
     Io(#[from] std::io::Error),
     #[error("Network error: {0}")]
     Network(String),
+    #[error("Rate limited by ClawHub — please wait a moment and try again: {0}")]
+    RateLimited(String),
     #[error("TOML parse error: {0}")]
     TomlParse(#[from] toml::de::Error),
     #[error("YAML parse error: {0}")]
     YamlParse(String),
     #[error("Security blocked: {0}")]
     SecurityBlocked(String),
+    #[error("Skill config error: {0}")]
+    Config(#[from] crate::config_injection::SkillConfigError),
 }
 
 /// The runtime type for a skill.
@@ -53,6 +59,8 @@ pub enum SkillRuntime {
     Wasm,
     /// Node.js module (OpenClaw compatibility).
     Node,
+    /// Shell/Bash script executed in subprocess.
+    Shell,
     /// Built-in (compiled into the binary).
     Builtin,
     /// Prompt-only skill: injects context into the LLM system prompt.
@@ -116,6 +124,12 @@ pub struct SkillManifest {
     /// Provenance tracking — where this skill came from.
     #[serde(default)]
     pub source: Option<SkillSource>,
+    /// Declared runtime config variables (from the SKILL.md `config:`
+    /// frontmatter). Resolved by the registry loader against the user's
+    /// `[skills.<name>]` section, env vars, and defaults; the resulting block
+    /// is appended to `prompt_context` at load time. Empty by default.
+    #[serde(default)]
+    pub config: std::collections::HashMap<String, crate::config_injection::SkillConfigVar>,
 }
 
 /// Skill metadata section.

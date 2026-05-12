@@ -1,6 +1,21 @@
 // OpenFang Agents Page — Multi-step spawn wizard, detail view with tabs, file editor, personality presets
 'use strict';
 
+/** Escape a string for use inside TOML triple-quoted strings ("""\n...\n""").
+ *  Backslashes are escaped, and runs of 3+ consecutive double-quotes are
+ *  broken up so the TOML parser never sees an unintended closing delimiter.
+ */
+function tomlMultilineEscape(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"""/g, '""\\"');
+}
+
+/** Escape a string for use inside a TOML basic (single-line) string ("...").
+ *  Backslashes, double-quotes, and common control chars are escaped.
+ */
+function tomlBasicEscape(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+}
+
 function agentsPage() {
   return {
     tab: 'agents',
@@ -25,6 +40,8 @@ function agentsPage() {
     },
 
     // -- Multi-step wizard state --
+    spawnProviders: [],       // populated from /api/providers on wizard open
+    spawnProvidersLoading: false,
     spawnStep: 1,
     spawnIdentity: { emoji: '', color: '#FF5C00', archetype: '' },
     selectedPreset: '',
@@ -36,14 +53,23 @@ function agentsPage() {
       '\u{2764}\uFE0F', '\u{1F31F}', '\u{1F527}', '\u{1F4DD}', '\u{1F4A1}', '\u{1F3A8}'
     ],
     archetypeOptions: ['Assistant', 'Researcher', 'Coder', 'Writer', 'DevOps', 'Support', 'Analyst', 'Custom'],
-    personalityPresets: [
-      { id: 'professional', label: 'Professional', soul: 'Communicate in a clear, professional tone. Be direct and structured. Use formal language and data-driven reasoning. Prioritize accuracy over personality.' },
-      { id: 'friendly', label: 'Friendly', soul: 'Be warm, approachable, and conversational. Use casual language and show genuine interest in the user. Add personality to your responses while staying helpful.' },
-      { id: 'technical', label: 'Technical', soul: 'Focus on technical accuracy and depth. Use precise terminology. Show your work and reasoning. Prefer code examples and structured explanations.' },
-      { id: 'creative', label: 'Creative', soul: 'Be imaginative and expressive. Use vivid language, analogies, and unexpected connections. Encourage creative thinking and explore multiple perspectives.' },
-      { id: 'concise', label: 'Concise', soul: 'Be extremely brief and to the point. No filler, no pleasantries. Answer in the fewest words possible while remaining accurate and complete.' },
-      { id: 'mentor', label: 'Mentor', soul: 'Be patient and encouraging like a great teacher. Break down complex topics step by step. Ask guiding questions. Celebrate progress and build confidence.' }
-    ],
+    _personalityPresetsLoaded: false,
+    personalityPresets: [], // Loaded dynamically with i18n
+
+    // Load personality presets with i18n
+    loadPersonalityPresets: function() {
+      if (this._personalityPresetsLoaded) return;
+      var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
+      this.personalityPresets = [
+        { id: 'professional', label: t('presets.professional'), soul: t('presets.professional_soul') },
+        { id: 'friendly', label: t('presets.friendly'), soul: t('presets.friendly_soul') },
+        { id: 'technical', label: t('presets.technical'), soul: t('presets.technical_soul') },
+        { id: 'creative', label: t('presets.creative'), soul: t('presets.creative_soul') },
+        { id: 'concise', label: t('presets.concise'), soul: t('presets.concise_soul') },
+        { id: 'mentor', label: t('presets.mentor'), soul: t('presets.mentor_soul') }
+      ];
+      this._personalityPresetsLoaded = true;
+    },
 
     // -- Detail modal tabs --
     detailTab: 'info',
@@ -54,6 +80,20 @@ function agentsPage() {
     filesLoading: false,
     configForm: {},
     configSaving: false,
+    // -- Tool filters --
+    toolFilters: { tool_allowlist: [], tool_blocklist: [] },
+    toolFiltersLoading: false,
+    newAllowTool: '',
+    newBlockTool: '',
+    // -- Model switch --
+    editingModel: false,
+    newModelValue: '',
+    editingProvider: false,
+    newProviderValue: '',
+    modelSaving: false,
+    // -- Fallback chain --
+    editingFallback: false,
+    newFallbackValue: '',
 
     // -- Templates state --
     tplTemplates: [],
@@ -63,112 +103,36 @@ function agentsPage() {
     selectedCategory: 'All',
     searchQuery: '',
 
-    builtinTemplates: [
-      {
-        name: 'General Assistant',
-        description: 'A versatile conversational agent that can help with everyday tasks, answer questions, and provide recommendations.',
-        category: 'General',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'full',
-        system_prompt: 'You are a helpful, friendly assistant. Provide clear, accurate, and concise responses. Ask clarifying questions when needed.'
-      },
-      {
-        name: 'Code Helper',
-        description: 'A programming-focused agent that writes, reviews, and debugs code across multiple languages.',
-        category: 'Development',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'coding',
-        system_prompt: 'You are an expert programmer. Help users write clean, efficient code. Explain your reasoning. Follow best practices and conventions for the language being used.'
-      },
-      {
-        name: 'Researcher',
-        description: 'An analytical agent that breaks down complex topics, synthesizes information, and provides cited summaries.',
-        category: 'Research',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'research',
-        system_prompt: 'You are a research analyst. Break down complex topics into clear explanations. Provide structured analysis with key findings. Cite sources when available.'
-      },
-      {
-        name: 'Writer',
-        description: 'A creative writing agent that helps with drafting, editing, and improving written content of all kinds.',
-        category: 'Writing',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'full',
-        system_prompt: 'You are a skilled writer and editor. Help users create polished content. Adapt your tone and style to match the intended audience. Offer constructive suggestions for improvement.'
-      },
-      {
-        name: 'Data Analyst',
-        description: 'A data-focused agent that helps analyze datasets, create queries, and interpret statistical results.',
-        category: 'Development',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'coding',
-        system_prompt: 'You are a data analysis expert. Help users understand their data, write SQL/Python queries, and interpret results. Present findings clearly with actionable insights.'
-      },
-      {
-        name: 'DevOps Engineer',
-        description: 'A systems-focused agent for CI/CD, infrastructure, Docker, and deployment troubleshooting.',
-        category: 'Development',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'automation',
-        system_prompt: 'You are a DevOps engineer. Help with CI/CD pipelines, Docker, Kubernetes, infrastructure as code, and deployment. Prioritize reliability and security.'
-      },
-      {
-        name: 'Customer Support',
-        description: 'A professional, empathetic agent for handling customer inquiries and resolving issues.',
-        category: 'Business',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'messaging',
-        system_prompt: 'You are a professional customer support representative. Be empathetic, patient, and solution-oriented. Acknowledge concerns before offering solutions. Escalate complex issues appropriately.'
-      },
-      {
-        name: 'Tutor',
-        description: 'A patient educational agent that explains concepts step-by-step and adapts to the learner\'s level.',
-        category: 'General',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'full',
-        system_prompt: 'You are a patient and encouraging tutor. Explain concepts step by step, starting from fundamentals. Use analogies and examples. Check understanding before moving on. Adapt to the learner\'s pace.'
-      },
-      {
-        name: 'API Designer',
-        description: 'An agent specialized in RESTful API design, OpenAPI specs, and integration architecture.',
-        category: 'Development',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'coding',
-        system_prompt: 'You are an API design expert. Help users design clean, consistent RESTful APIs following best practices. Cover endpoint naming, request/response schemas, error handling, and versioning.'
-      },
-      {
-        name: 'Meeting Notes',
-        description: 'Summarizes meeting transcripts into structured notes with action items and key decisions.',
-        category: 'Business',
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile',
-        profile: 'minimal',
-        system_prompt: 'You are a meeting summarizer. When given a meeting transcript or notes, produce a structured summary with: key decisions, action items (with owners), discussion highlights, and follow-up questions.'
-      }
-    ],
+    builtinTemplates: [],
+    
+    // Load templates from API
+    async init() {
+      await this.loadTemplates();
+      // Load personality presets with i18n
+      this.loadPersonalityPresets();
+    },
 
-    // ── Profile Descriptions ──
-    profileDescriptions: {
-      minimal: { label: 'Minimal', desc: 'Read-only file access' },
-      coding: { label: 'Coding', desc: 'Files + shell + web fetch' },
-      research: { label: 'Research', desc: 'Web search + file read/write' },
-      messaging: { label: 'Messaging', desc: 'Agents + memory access' },
-      automation: { label: 'Automation', desc: 'All tools except custom' },
-      balanced: { label: 'Balanced', desc: 'General-purpose tool set' },
-      precise: { label: 'Precise', desc: 'Focused tool set for accuracy' },
-      creative: { label: 'Creative', desc: 'Full tools with creative emphasis' },
-      full: { label: 'Full', desc: 'All 35+ tools' }
+    // ── Profile Descriptions (loaded dynamically with i18n) ──
+    _profileDescriptionsLoaded: false,
+    profileDescriptions: {},
+    loadProfileDescriptions: function() {
+      if (this._profileDescriptionsLoaded) return;
+      var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
+      this.profileDescriptions = {
+        minimal: { label: t('agents.profile.minimal'), desc: t('agents.profile.minimal_desc') },
+        coding: { label: t('agents.profile.coding'), desc: t('agents.profile.coding_desc') },
+        research: { label: t('agents.profile.research'), desc: t('agents.profile.research_desc') },
+        messaging: { label: t('agents.profile.messaging'), desc: t('agents.profile.messaging_desc') },
+        automation: { label: t('agents.profile.automation'), desc: t('agents.profile.automation_desc') },
+        balanced: { label: t('agents.profile.balanced'), desc: t('agents.profile.balanced_desc') },
+        precise: { label: t('agents.profile.precise'), desc: t('agents.profile.precise_desc') },
+        creative: { label: t('agents.profile.creative'), desc: t('agents.profile.creative_desc') },
+        full: { label: t('agents.profile.full'), desc: t('agents.profile.full_desc') }
+      };
+      this._profileDescriptionsLoaded = true;
     },
     profileInfo: function(name) {
+      this.loadProfileDescriptions();
       return this.profileDescriptions[name] || { label: name, desc: '' };
     },
 
@@ -251,6 +215,9 @@ function agentsPage() {
       this.loadError = '';
       try {
         await Alpine.store('app').refreshAgents();
+        await this.loadTemplates();
+        this.loadPersonalityPresets();
+        this.loadProfileDescriptions();
       } catch(e) {
         this.loadError = e.message || 'Could not load agents. Is the daemon running?';
       }
@@ -288,10 +255,73 @@ function agentsPage() {
           OpenFangAPI.get('/api/templates'),
           OpenFangAPI.get('/api/providers').catch(function() { return { providers: [] }; })
         ]);
-        this.tplTemplates = results[0].templates || [];
+        // Combine static and dynamic templates
+        this.builtinTemplates = [
+          {
+            name: 'General Assistant',
+            description: 'A versatile conversational agent that can help with everyday tasks, answer questions, and provide recommendations.',
+            category: 'General',
+            provider: 'default',
+            model: 'default',
+            profile: 'full',
+            system_prompt: 'You are a helpful, friendly assistant. Provide clear, accurate, and concise responses. Ask clarifying questions when needed.',
+            manifest_toml: 'name = "General Assistant"\ndescription = "A versatile conversational agent that can help with everyday tasks, answer questions, and provide recommendations."\nmodule = "builtin:chat"\nprofile = "full"\n\n[model]\nprovider = "default"\nmodel = "default"\nsystem_prompt = """\nYou are a helpful, friendly assistant. Provide clear, accurate, and concise responses. Ask clarifying questions when needed.\n"""'
+          },
+          {
+            name: 'Code Helper',
+            description: 'A programming-focused agent that writes, reviews, and debugs code across multiple languages.',
+            category: 'Development',
+            provider: 'default',
+            model: 'default',
+            profile: 'coding',
+            system_prompt: 'You are an expert programmer. Help users write clean, efficient code. Explain your reasoning. Follow best practices and conventions for the language being used.',
+            manifest_toml: 'name = "Code Helper"\ndescription = "A programming-focused agent that writes, reviews, and debugs code across multiple languages."\nmodule = "builtin:chat"\nprofile = "coding"\n\n[model]\nprovider = "default"\nmodel = "default"\nsystem_prompt = """\nYou are an expert programmer. Help users write clean, efficient code. Explain your reasoning. Follow best practices and conventions for the language being used.\n"""'
+          },
+          {
+            name: 'Researcher',
+            description: 'An analytical agent that breaks down complex topics, synthesizes information, and provides cited summaries.',
+            category: 'Research',
+            provider: 'default',
+            model: 'default',
+            profile: 'research',
+            system_prompt: 'You are a research analyst. Break down complex topics into clear explanations. Provide structured analysis with key findings. Cite sources when available.',
+            manifest_toml: 'name = "Researcher"\ndescription = "An analytical agent that breaks down complex topics, synthesizes information, and provides cited summaries."\nmodule = "builtin:chat"\nprofile = "research"\n\n[model]\nprovider = "default"\nmodel = "default"\nsystem_prompt = """\nYou are a research analyst. Break down complex topics into clear explanations. Provide structured analysis with key findings. Cite sources when available.\n"""'
+          },
+          {
+            name: 'Writer',
+            description: 'A creative writing agent that helps with drafting, editing, and improving written content of all kinds.',
+            category: 'Writing',
+            provider: 'default',
+            model: 'default',
+            profile: 'full',
+            system_prompt: 'You are a skilled writer and editor. Help users create polished content. Adapt your tone and style to match the intended audience. Offer constructive suggestions for improvement.',
+            manifest_toml: 'name = "Writer"\ndescription = "A creative writing agent that helps with drafting, editing, and improving written content of all kinds."\nmodule = "builtin:chat"\nprofile = "full"\n\n[model]\nprovider = "default"\nmodel = "default"\nsystem_prompt = """\nYou are a skilled writer and editor. Help users create polished content. Adapt your tone and style to match the intended audience. Offer constructive suggestions for improvement.\n"""'
+          },
+          {
+            name: 'Data Analyst',
+            description: 'A data-focused agent that helps analyze datasets, create queries, and interpret statistical results.',
+            category: 'Development',
+            provider: 'default',
+            model: 'default',
+            profile: 'coding',
+            system_prompt: 'You are a data analysis expert. Help users understand their data, write SQL/Python queries, and interpret results. Present findings clearly with actionable insights.',
+            manifest_toml: 'name = "Data Analyst"\ndescription = "A data-focused agent that helps analyze datasets, create queries, and interpret statistical results."\nmodule = "builtin:chat"\nprofile = "coding"\n\n[model]\nprovider = "default"\nmodel = "default"\nsystem_prompt = """\nYou are a data analysis expert. Help users understand their data, write SQL/Python queries, and interpret results. Present findings clearly with actionable insights.\n"""'
+          },
+          {
+            name: 'DevOps Engineer',
+            description: 'A systems-focused agent for CI/CD, infrastructure, Docker, and deployment troubleshooting.',
+            category: 'Development',
+            provider: 'default',
+            model: 'default',
+            profile: 'automation',
+            system_prompt: 'You are a DevOps engineer. Help with CI/CD pipelines, Docker, Kubernetes, infrastructure as code, and deployment. Prioritize reliability and security.',
+            manifest_toml: 'name = "DevOps Engineer"\ndescription = "A systems-focused agent for CI/CD, infrastructure, Docker, and deployment troubleshooting."\nmodule = "builtin:chat"\nprofile = "automation"\n\n[model]\nprovider = "default"\nmodel = "default"\nsystem_prompt = """\nYou are a DevOps engineer. Help with CI/CD pipelines, Docker, Kubernetes, infrastructure as code, and deployment. Prioritize reliability and security.\n"""'
+          },
+          ...results[0].templates || []
+        ];
         this.tplProviders = results[1].providers || [];
       } catch(e) {
-        this.tplTemplates = [];
+        this.builtinTemplates = [];
         this.tplLoadError = e.message || 'Could not load templates.';
       }
       this.tplLoading = false;
@@ -307,20 +337,37 @@ function agentsPage() {
       OpenFangAPI.wsDisconnect();
     },
 
-    showDetail(agent) {
-      this.detailAgent = agent;
+    buildConfigForm(agent) {
+      var identity = (agent && agent.identity) || {};
+      return {
+        name: (agent && agent.name) || '',
+        system_prompt: (agent && agent.system_prompt) || '',
+        emoji: identity.emoji || '',
+        color: identity.color || '#FF5C00',
+        archetype: identity.archetype || '',
+        vibe: identity.vibe || ''
+      };
+    },
+
+    async showDetail(agent) {
       this.detailTab = 'info';
       this.agentFiles = [];
       this.editingFile = null;
       this.fileContent = '';
-      this.configForm = {
-        name: agent.name || '',
-        system_prompt: agent.system_prompt || '',
-        emoji: (agent.identity && agent.identity.emoji) || '',
-        color: (agent.identity && agent.identity.color) || '#FF5C00',
-        archetype: (agent.identity && agent.identity.archetype) || '',
-        vibe: (agent.identity && agent.identity.vibe) || ''
-      };
+      this.editingFallback = false;
+      this.newFallbackValue = '';
+      // Load the full detail payload before opening the modal so editable
+      // fields such as system_prompt and identity metadata are hydrated.
+      var detail = agent;
+      try {
+        var full = await OpenFangAPI.get('/api/agents/' + agent.id);
+        detail = Object.assign({}, agent, full, {
+          identity: Object.assign({}, (agent && agent.identity) || {}, (full && full.identity) || {})
+        });
+      } catch(e) { /* fall back to list payload */ }
+      this.detailAgent = detail;
+      this.detailAgent._fallbacks = detail.fallback_models || [];
+      this.configForm = this.buildConfigForm(detail);
       this.showDetailModal = true;
     },
 
@@ -336,6 +383,29 @@ function agentsPage() {
           OpenFangToast.error('Failed to stop agent: ' + e.message);
         }
       });
+    },
+
+    // Issue #1163: uninstall an agent (kill + remove ~/.openfang/agents/<name>/).
+    uninstallAgent(agent) {
+      var self = this;
+      OpenFangToast.confirm(
+        'Uninstall Agent',
+        'Uninstall agent "' + agent.name + '"? This stops the agent AND deletes its files from your workspace. This cannot be undone.',
+        async function() {
+          try {
+            var res = await OpenFangAPI.del('/api/agents/' + agent.id + '/uninstall');
+            var msg = 'Agent "' + agent.name + '" uninstalled';
+            if (res && res.dir_removed === false) {
+              msg += ' (no on-disk files found)';
+            }
+            OpenFangToast.success(msg);
+            self.showDetailModal = false;
+            await Alpine.store('app').refreshAgents();
+          } catch(e) {
+            OpenFangToast.error('Failed to uninstall agent: ' + e.message);
+          }
+        }
+      );
     },
 
     killAllAgents() {
@@ -358,7 +428,7 @@ function agentsPage() {
     },
 
     // ── Multi-step wizard navigation ──
-    openSpawnWizard() {
+    async openSpawnWizard() {
       this.showSpawnModal = true;
       this.spawnStep = 1;
       this.spawnMode = 'wizard';
@@ -366,8 +436,26 @@ function agentsPage() {
       this.selectedPreset = '';
       this.soulContent = '';
       this.spawnForm.name = '';
+      this.spawnForm.provider = 'default';
+      this.spawnForm.model = 'default';
       this.spawnForm.systemPrompt = 'You are a helpful assistant.';
       this.spawnForm.profile = 'full';
+      // Fetch status defaults and dynamic provider list concurrently
+      this.spawnProvidersLoading = true;
+      try {
+        var results = await Promise.all([
+          OpenFangAPI.get('/api/status').catch(function() { return {}; }),
+          OpenFangAPI.get('/api/providers').catch(function() { return { providers: [] }; })
+        ]);
+        var status = results[0];
+        var provData = results[1];
+        if (status.default_provider) this.spawnForm.provider = status.default_provider;
+        if (status.default_model) this.spawnForm.model = status.default_model;
+        this.spawnProviders = provData.providers || [];
+      } catch(e) {
+        this.spawnProviders = [];
+      }
+      this.spawnProvidersLoading = false;
     },
 
     nextStep() {
@@ -391,7 +479,7 @@ function agentsPage() {
       var f = this.spawnForm;
       var si = this.spawnIdentity;
       var lines = [
-        'name = "' + f.name + '"',
+        'name = "' + tomlBasicEscape(f.name) + '"',
         'module = "builtin:chat"'
       ];
       if (f.profile && f.profile !== 'custom') {
@@ -400,7 +488,7 @@ function agentsPage() {
       lines.push('', '[model]');
       lines.push('provider = "' + f.provider + '"');
       lines.push('model = "' + f.model + '"');
-      lines.push('system_prompt = "' + f.systemPrompt.replace(/"/g, '\\"') + '"');
+      lines.push('system_prompt = """\n' + tomlMultilineEscape(f.systemPrompt) + '\n"""');
       if (f.profile === 'custom') {
         lines.push('', '[capabilities]');
         if (f.caps.memory_read) lines.push('memory_read = ["*"]');
@@ -543,15 +631,20 @@ function agentsPage() {
     },
 
     // -- Template methods --
-    async spawnFromTemplate(name) {
+    async spawnFromTemplate(template) {
       try {
-        var data = await OpenFangAPI.get('/api/templates/' + encodeURIComponent(name));
-        if (data.manifest_toml) {
-          var res = await OpenFangAPI.post('/api/agents', { manifest_toml: data.manifest_toml });
+        var manifestToml = template.manifest_toml;
+        if (!manifestToml) {
+          // If template doesn't have manifest_toml, fetch it from the API
+          var data = await OpenFangAPI.get('/api/templates/' + encodeURIComponent(template.name));
+          manifestToml = data.manifest_toml;
+        }
+        if (manifestToml) {
+          var res = await OpenFangAPI.post('/api/agents', { manifest_toml: manifestToml });
           if (res.agent_id) {
-            OpenFangToast.success('Agent "' + (res.name || name) + '" spawned from template');
+            OpenFangToast.success('Agent "' + (res.name || template.name) + '" spawned from template');
             await Alpine.store('app').refreshAgents();
-            this.chatWithAgent({ id: res.agent_id, name: res.name || name, model_provider: '?', model_name: '?' });
+            this.chatWithAgent({ id: res.agent_id, name: res.name || template.name, model_provider: '?', model_name: '?' });
           }
         }
       } catch(e) {
@@ -559,13 +652,151 @@ function agentsPage() {
       }
     },
 
+    // ── Clear agent history ──
+    async clearHistory(agent) {
+      var self = this;
+      OpenFangToast.confirm('Clear History', 'Clear all conversation history for "' + agent.name + '"? This cannot be undone.', async function() {
+        try {
+          await OpenFangAPI.del('/api/agents/' + agent.id + '/history');
+          OpenFangToast.success('History cleared for "' + agent.name + '"');
+        } catch(e) {
+          OpenFangToast.error('Failed to clear history: ' + e.message);
+        }
+      });
+    },
+
+    // ── Model switch ──
+    async changeModel() {
+      if (!this.detailAgent || !this.newModelValue.trim()) return;
+      this.modelSaving = true;
+      try {
+        var resp = await OpenFangAPI.put('/api/agents/' + this.detailAgent.id + '/model', { model: this.newModelValue.trim() });
+        var providerInfo = (resp && resp.provider) ? ' (provider: ' + resp.provider + ')' : '';
+        OpenFangToast.success('Model changed' + providerInfo + ' (memory reset)');
+        this.editingModel = false;
+        await Alpine.store('app').refreshAgents();
+        // Refresh detailAgent
+        var agents = Alpine.store('app').agents;
+        for (var i = 0; i < agents.length; i++) {
+          if (agents[i].id === this.detailAgent.id) { this.detailAgent = agents[i]; break; }
+        }
+      } catch(e) {
+        OpenFangToast.error('Failed to change model: ' + e.message);
+      }
+      this.modelSaving = false;
+    },
+
+    // ── Provider switch ──
+    async changeProvider() {
+      if (!this.detailAgent || !this.newProviderValue.trim()) return;
+      this.modelSaving = true;
+      try {
+        var combined = this.newProviderValue.trim() + '/' + this.detailAgent.model_name;
+        var resp = await OpenFangAPI.put('/api/agents/' + this.detailAgent.id + '/model', { model: combined });
+        OpenFangToast.success('Provider changed to ' + (resp && resp.provider ? resp.provider : this.newProviderValue.trim()));
+        this.editingProvider = false;
+        await Alpine.store('app').refreshAgents();
+        var agents = Alpine.store('app').agents;
+        for (var i = 0; i < agents.length; i++) {
+          if (agents[i].id === this.detailAgent.id) { this.detailAgent = agents[i]; break; }
+        }
+      } catch(e) {
+        OpenFangToast.error('Failed to change provider: ' + e.message);
+      }
+      this.modelSaving = false;
+    },
+
+    // ── Fallback model chain ──
+    async addFallback() {
+      if (!this.detailAgent || !this.newFallbackValue.trim()) return;
+      var parts = this.newFallbackValue.trim().split('/');
+      var provider = parts.length > 1 ? parts[0] : this.detailAgent.model_provider;
+      var model = parts.length > 1 ? parts.slice(1).join('/') : parts[0];
+      if (!this.detailAgent._fallbacks) this.detailAgent._fallbacks = [];
+      this.detailAgent._fallbacks.push({ provider: provider, model: model });
+      try {
+        await OpenFangAPI.patch('/api/agents/' + this.detailAgent.id + '/config', {
+          fallback_models: this.detailAgent._fallbacks
+        });
+        OpenFangToast.success('Fallback added: ' + provider + '/' + model);
+      } catch(e) {
+        OpenFangToast.error('Failed to save fallbacks: ' + e.message);
+        this.detailAgent._fallbacks.pop();
+      }
+      this.editingFallback = false;
+      this.newFallbackValue = '';
+    },
+
+    async removeFallback(idx) {
+      if (!this.detailAgent || !this.detailAgent._fallbacks) return;
+      var removed = this.detailAgent._fallbacks.splice(idx, 1);
+      try {
+        await OpenFangAPI.patch('/api/agents/' + this.detailAgent.id + '/config', {
+          fallback_models: this.detailAgent._fallbacks
+        });
+        OpenFangToast.success('Fallback removed');
+      } catch(e) {
+        OpenFangToast.error('Failed to save fallbacks: ' + e.message);
+        this.detailAgent._fallbacks.splice(idx, 0, removed[0]);
+      }
+    },
+
+    // ── Tool filters ──
+    async loadToolFilters() {
+      if (!this.detailAgent) return;
+      this.toolFiltersLoading = true;
+      try {
+        this.toolFilters = await OpenFangAPI.get('/api/agents/' + this.detailAgent.id + '/tools');
+      } catch(e) {
+        this.toolFilters = { tool_allowlist: [], tool_blocklist: [] };
+      }
+      this.toolFiltersLoading = false;
+    },
+
+    addAllowTool() {
+      var t = this.newAllowTool.trim();
+      if (t && this.toolFilters.tool_allowlist.indexOf(t) === -1) {
+        this.toolFilters.tool_allowlist.push(t);
+        this.newAllowTool = '';
+        this.saveToolFilters();
+      }
+    },
+
+    removeAllowTool(tool) {
+      this.toolFilters.tool_allowlist = this.toolFilters.tool_allowlist.filter(function(t) { return t !== tool; });
+      this.saveToolFilters();
+    },
+
+    addBlockTool() {
+      var t = this.newBlockTool.trim();
+      if (t && this.toolFilters.tool_blocklist.indexOf(t) === -1) {
+        this.toolFilters.tool_blocklist.push(t);
+        this.newBlockTool = '';
+        this.saveToolFilters();
+      }
+    },
+
+    removeBlockTool(tool) {
+      this.toolFilters.tool_blocklist = this.toolFilters.tool_blocklist.filter(function(t) { return t !== tool; });
+      this.saveToolFilters();
+    },
+
+    async saveToolFilters() {
+      if (!this.detailAgent) return;
+      try {
+        await OpenFangAPI.put('/api/agents/' + this.detailAgent.id + '/tools', this.toolFilters);
+      } catch(e) {
+        OpenFangToast.error('Failed to update tool filters: ' + e.message);
+      }
+    },
+
     async spawnBuiltin(t) {
-      var toml = 'name = "' + t.name + '"\n';
-      toml += 'description = "' + t.description.replace(/"/g, '\\"') + '"\n';
+      var toml = 'name = "' + tomlBasicEscape(t.name) + '"\n';
+      toml += 'description = "' + tomlBasicEscape(t.description) + '"\n';
       toml += 'module = "builtin:chat"\n';
       toml += 'profile = "' + t.profile + '"\n\n';
       toml += '[model]\nprovider = "' + t.provider + '"\nmodel = "' + t.model + '"\n';
-      toml += 'system_prompt = """\n' + t.system_prompt + '\n"""\n';
+      toml += 'system_prompt = """\n' + tomlMultilineEscape(t.system_prompt) + '\n"""\n';
 
       try {
         var res = await OpenFangAPI.post('/api/agents', { manifest_toml: toml });

@@ -1,6 +1,16 @@
 // OpenFang Setup Wizard — First-run guided setup (Provider + Agent + Channel)
 'use strict';
 
+/** Escape a string for use inside TOML triple-quoted strings ("""\n...\n"""). */
+function wizardTomlMultilineEscape(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"""/g, '""\\"');
+}
+
+/** Escape a string for use inside a TOML basic (single-line) string ("..."). */
+function wizardTomlBasicEscape(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+}
+
 function wizardPage() {
   return {
     step: 1,
@@ -148,15 +158,17 @@ function wizardPage() {
       return this.templates.filter(function(t) { return t.category === cat; });
     },
 
-    // Step 3: Profile/tool descriptions
-    profileDescriptions: {
-      minimal: { label: 'Minimal', desc: 'Read-only file access' },
-      coding: { label: 'Coding', desc: 'Files + shell + web fetch' },
-      research: { label: 'Research', desc: 'Web search + file read/write' },
-      balanced: { label: 'Balanced', desc: 'General-purpose tool set' },
-      precise: { label: 'Precise', desc: 'Focused tool set for accuracy' },
-      creative: { label: 'Creative', desc: 'Full tools with creative emphasis' },
-      full: { label: 'Full', desc: 'All 35+ tools' }
+    // Step 3: Profile/tool descriptions (loaded from i18n)
+    get profileDescriptions() {
+      return {
+        minimal: { label: window.i18n ? window.i18n.t('wizard.profile_minimal') : 'Minimal', desc: window.i18n ? window.i18n.t('wizard.profile_minimal_desc') : 'Read-only file access' },
+        coding: { label: window.i18n ? window.i18n.t('wizard.profile_coding') : 'Coding', desc: window.i18n ? window.i18n.t('wizard.profile_coding_desc') : 'Files + shell + web fetch' },
+        research: { label: window.i18n ? window.i18n.t('wizard.profile_research') : 'Research', desc: window.i18n ? window.i18n.t('wizard.profile_research_desc') : 'Web search + file read/write' },
+        balanced: { label: window.i18n ? window.i18n.t('wizard.profile_balanced') : 'Balanced', desc: window.i18n ? window.i18n.t('wizard.profile_balanced_desc') : 'General-purpose tool set' },
+        precise: { label: window.i18n ? window.i18n.t('wizard.profile_precise') : 'Precise', desc: window.i18n ? window.i18n.t('wizard.profile_precise_desc') : 'Focused tool set for accuracy' },
+        creative: { label: window.i18n ? window.i18n.t('wizard.profile_creative') : 'Creative', desc: window.i18n ? window.i18n.t('wizard.profile_creative_desc') : 'Full tools with creative emphasis' },
+        full: { label: window.i18n ? window.i18n.t('wizard.profile_full') : 'Full', desc: window.i18n ? window.i18n.t('wizard.profile_full_desc') : 'All 35+ tools' }
+      };
     },
     profileInfo: function(name) { return this.profileDescriptions[name] || { label: name, desc: '' }; },
 
@@ -164,12 +176,35 @@ function wizardPage() {
     tryItMessages: [],
     tryItInput: '',
     tryItSending: false,
-    suggestedMessages: {
-      'General': ['What can you help me with?', 'Tell me a fun fact', 'Summarize the latest AI news'],
-      'Development': ['Write a Python hello world', 'Explain async/await', 'Review this code snippet'],
-      'Research': ['Explain quantum computing simply', 'Compare React vs Vue', 'What are the latest trends in AI?'],
-      'Writing': ['Help me write a professional email', 'Improve this paragraph', 'Write a blog intro about AI'],
-      'Business': ['Draft a meeting agenda', 'How do I handle a complaint?', 'Create a project status update']
+    get suggestedMessages() {
+      var t = window.i18n ? window.i18n.t.bind(window.i18n) : function(k) { return k; };
+      return {
+        'General': [
+          t('wizard.suggestions.general.1') || 'What can you help me with?',
+          t('wizard.suggestions.general.2') || 'Tell me a fun fact',
+          t('wizard.suggestions.general.3') || 'Summarize the latest AI news'
+        ],
+        'Development': [
+          t('wizard.suggestions.development.1') || 'Write a Python hello world',
+          t('wizard.suggestions.development.2') || 'Explain async/await',
+          t('wizard.suggestions.development.3') || 'Review this code snippet'
+        ],
+        'Research': [
+          t('wizard.suggestions.research.1') || 'Explain quantum computing simply',
+          t('wizard.suggestions.research.2') || 'Compare React vs Vue',
+          t('wizard.suggestions.research.3') || 'What are the latest trends in AI?'
+        ],
+        'Writing': [
+          t('wizard.suggestions.writing.1') || 'Help me write a professional email',
+          t('wizard.suggestions.writing.2') || 'Improve this paragraph',
+          t('wizard.suggestions.writing.3') || 'Write a blog intro about AI'
+        ],
+        'Business': [
+          t('wizard.suggestions.business.1') || 'Draft a meeting agenda',
+          t('wizard.suggestions.business.2') || 'How do I handle a complaint?',
+          t('wizard.suggestions.business.3') || 'Create a project status update'
+        ]
+      };
     },
     get currentSuggestions() {
       var tpl = this.templates[this.selectedTemplate];
@@ -194,38 +229,41 @@ function wizardPage() {
 
     // Step 5: Channel setup (optional)
     channelType: '',
-    channelOptions: [
-      {
-        name: 'telegram',
-        display_name: 'Telegram',
-        icon: 'TG',
-        description: 'Connect your agent to a Telegram bot for messaging.',
-        token_label: 'Bot Token',
-        token_placeholder: '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11',
-        token_env: 'TELEGRAM_BOT_TOKEN',
-        help: 'Create a bot via @BotFather on Telegram to get your token.'
-      },
-      {
-        name: 'discord',
-        display_name: 'Discord',
-        icon: 'DC',
-        description: 'Connect your agent to a Discord server via bot token.',
-        token_label: 'Bot Token',
-        token_placeholder: 'MTIz...abc',
-        token_env: 'DISCORD_BOT_TOKEN',
-        help: 'Create a Discord application at discord.com/developers and add a bot.'
-      },
-      {
-        name: 'slack',
-        display_name: 'Slack',
-        icon: 'SL',
-        description: 'Connect your agent to a Slack workspace.',
-        token_label: 'Bot Token',
-        token_placeholder: 'xoxb-...',
-        token_env: 'SLACK_BOT_TOKEN',
-        help: 'Create a Slack app at api.slack.com/apps and install it to your workspace.'
-      }
-    ],
+    get channelOptions() {
+      var t = window.i18n ? window.i18n.t.bind(window.i18n) : function(k) { return k; };
+      return [
+        {
+          name: 'telegram',
+          display_name: t('wizard.channel_telegram') || 'Telegram',
+          icon: 'TG',
+          description: t('wizard.channel_telegram_desc') || 'Connect your agent to a Telegram bot for messaging.',
+          token_label: t('wizard.channel_telegram_token') || 'Bot Token',
+          token_placeholder: '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11',
+          token_env: 'TELEGRAM_BOT_TOKEN',
+          help: t('wizard.channel_telegram_help') || 'Create a bot via @BotFather on Telegram to get your token.'
+        },
+        {
+          name: 'discord',
+          display_name: t('wizard.channel_discord') || 'Discord',
+          icon: 'DC',
+          description: t('wizard.channel_discord_desc') || 'Connect your agent to a Discord server via bot token.',
+          token_label: t('wizard.channel_discord_token') || 'Bot Token',
+          token_placeholder: 'MTIz...abc',
+          token_env: 'DISCORD_BOT_TOKEN',
+          help: t('wizard.channel_discord_help') || 'Create a Discord application at discord.com/developers and add a bot.'
+        },
+        {
+          name: 'slack',
+          display_name: t('wizard.channel_slack') || 'Slack',
+          icon: 'SL',
+          description: t('wizard.channel_slack_desc') || 'Connect your agent to a Slack workspace.',
+          token_label: t('wizard.channel_slack_token') || 'Bot Token',
+          token_placeholder: 'xoxb-...',
+          token_env: 'SLACK_BOT_TOKEN',
+          help: t('wizard.channel_slack_help') || 'Create a Slack app at api.slack.com/apps and install it to your workspace.'
+        }
+      ];
+    },
     channelToken: '',
     configuringChannel: false,
     channelConfigured: false,
@@ -244,6 +282,15 @@ function wizardPage() {
       this.error = '';
       try {
         await this.loadProviders();
+        // Pre-select first unconfigured provider, or first one
+        var unconfigured = this.providers.filter(function(p) {
+          return p.auth_status !== 'configured' && p.api_key_env;
+        });
+        if (unconfigured.length > 0) {
+          this.selectedProvider = unconfigured[0].id;
+        } else if (this.providers.length > 0) {
+          this.selectedProvider = this.providers[0].id;
+        }
       } catch(e) {
         this.error = e.message || 'Could not load setup data.';
       }
@@ -278,15 +325,25 @@ function wizardPage() {
     },
 
     stepLabel(n) {
-      var labels = ['Welcome', 'Provider', 'Agent', 'Try It', 'Channel', 'Done'];
+      var t = window.i18n ? window.i18n.t.bind(window.i18n) : function(k) { return k; };
+      var labels = [
+        t('wizard.step_welcome') || 'Welcome',
+        t('wizard.step_provider') || 'Provider',
+        t('wizard.step_agent') || 'Agent',
+        t('wizard.step_try_it') || 'Try It',
+        t('wizard.step_channel') || 'Channel',
+        t('wizard.step_done') || 'Done'
+      ];
       return labels[n - 1] || '';
     },
 
     get canGoNext() {
-      if (this.step === 2) return this.keySaved || this.hasConfiguredProvider;
+      if (this.step === 2) return this.keySaved || this.hasConfiguredProvider || this.claudeCodeDetected;
       if (this.step === 3) return this.agentName.trim().length > 0;
       return true;
     },
+
+    claudeCodeDetected: false,
 
     get hasConfiguredProvider() {
       var self = this;
@@ -301,15 +358,6 @@ function wizardPage() {
       try {
         var data = await OpenFangAPI.get('/api/providers');
         this.providers = data.providers || [];
-        // Pre-select first unconfigured provider, or first one
-        var unconfigured = this.providers.filter(function(p) {
-          return p.auth_status !== 'configured' && p.api_key_env;
-        });
-        if (unconfigured.length > 0) {
-          this.selectedProvider = unconfigured[0].id;
-        } else if (this.providers.length > 0) {
-          this.selectedProvider = this.providers[0].id;
-        }
       } catch(e) { this.providers = []; }
     },
 
@@ -320,7 +368,7 @@ function wizardPage() {
     },
 
     get popularProviders() {
-      var popular = ['anthropic', 'openai', 'gemini', 'groq', 'deepseek', 'openrouter'];
+      var popular = ['anthropic', 'openai', 'gemini', 'groq', 'deepseek', 'openrouter', 'claude-code'];
       return this.providers.filter(function(p) {
         return popular.indexOf(p.id) >= 0;
       }).sort(function(a, b) {
@@ -329,7 +377,7 @@ function wizardPage() {
     },
 
     get otherProviders() {
-      var popular = ['anthropic', 'openai', 'gemini', 'groq', 'deepseek', 'openrouter'];
+      var popular = ['anthropic', 'openai', 'gemini', 'groq', 'deepseek', 'openrouter', 'claude-code'];
       return this.providers.filter(function(p) {
         return popular.indexOf(p.id) < 0;
       });
@@ -355,7 +403,8 @@ function wizardPage() {
         fireworks: { url: 'https://fireworks.ai/account/api-keys', text: 'Get your key from Fireworks AI' },
         perplexity: { url: 'https://www.perplexity.ai/settings/api', text: 'Get your key from Perplexity Settings' },
         cohere: { url: 'https://dashboard.cohere.com/api-keys', text: 'Get your key from the Cohere Dashboard' },
-        xai: { url: 'https://console.x.ai/', text: 'Get your key from the xAI Console' }
+        xai: { url: 'https://console.x.ai/', text: 'Get your key from the xAI Console' },
+        'claude-code': { url: 'https://docs.anthropic.com/en/docs/claude-code', text: 'Install: npm install -g @anthropic-ai/claude-code && claude auth (no API key needed)' }
       };
       return help[id] || null;
     },
@@ -369,7 +418,7 @@ function wizardPage() {
       if (!provider) return;
       var key = this.apiKeyInput.trim();
       if (!key) {
-        OpenFangToast.error('Please enter an API key');
+        OpenFangToast.error(window.i18n ? window.i18n.t('wizard.enter_api_key') : 'Please enter an API key');
         return;
       }
       this.savingKey = true;
@@ -378,12 +427,12 @@ function wizardPage() {
         this.apiKeyInput = '';
         this.keySaved = true;
         this.setupSummary.provider = provider.display_name;
-        OpenFangToast.success('API key saved for ' + provider.display_name);
+        OpenFangToast.success((window.i18n ? window.i18n.t('wizard.api_key_saved') : 'API key saved for') + ' ' + provider.display_name);
         await this.loadProviders();
         // Auto-test after saving
         await this.testKey();
       } catch(e) {
-        OpenFangToast.error('Failed to save key: ' + e.message);
+        OpenFangToast.error((window.i18n ? window.i18n.t('wizard.failed_save_key') : 'Failed to save key:') + ' ' + e.message);
       }
       this.savingKey = false;
     },
@@ -397,13 +446,35 @@ function wizardPage() {
         var result = await OpenFangAPI.post('/api/providers/' + encodeURIComponent(provider.id) + '/test', {});
         this.testResult = result;
         if (result.status === 'ok') {
-          OpenFangToast.success(provider.display_name + ' connected (' + (result.latency_ms || '?') + 'ms)');
+          OpenFangToast.success(provider.display_name + ' ' + (window.i18n ? window.i18n.t('wizard.connected') : 'connected') + ' (' + (result.latency_ms || '?') + 'ms)');
         } else {
-          OpenFangToast.error(provider.display_name + ': ' + (result.error || 'Connection failed'));
+          OpenFangToast.error(provider.display_name + ': ' + (result.error || (window.i18n ? window.i18n.t('wizard.connection_failed') : 'Connection failed')));
         }
       } catch(e) {
         this.testResult = { status: 'error', error: e.message };
-        OpenFangToast.error('Test failed: ' + e.message);
+        OpenFangToast.error((window.i18n ? window.i18n.t('wizard.test_failed') : 'Test failed:') + ' ' + e.message);
+      }
+      this.testingProvider = false;
+    },
+
+    async detectClaudeCode() {
+      this.testingProvider = true;
+      this.testResult = null;
+      try {
+        var result = await OpenFangAPI.post('/api/providers/claude-code/test', {});
+        this.testResult = result;
+        if (result.status === 'ok') {
+          this.claudeCodeDetected = true;
+          this.keySaved = true;
+          this.setupSummary.provider = 'Claude Code';
+          OpenFangToast.success('Claude Code detected (' + (result.latency_ms || '?') + 'ms)');
+        } else {
+          this.testResult = { status: 'error', error: 'Claude Code CLI not detected' };
+          OpenFangToast.error('Claude Code CLI not detected. Make sure you\'ve run: npm install -g @anthropic-ai/claude-code && claude auth');
+        }
+      } catch(e) {
+        this.testResult = { status: 'error', error: e.message };
+        OpenFangToast.error('Claude Code CLI not detected. Make sure you\'ve run: npm install -g @anthropic-ai/claude-code && claude auth');
       }
       this.testingProvider = false;
     },
@@ -423,7 +494,7 @@ function wizardPage() {
       if (!tpl) return;
       var name = this.agentName.trim();
       if (!name) {
-        OpenFangToast.error('Please enter a name for your agent');
+        OpenFangToast.error(window.i18n ? window.i18n.t('wizard.enter_agent_name') : 'Please enter a name for your agent');
         return;
       }
 
@@ -437,12 +508,12 @@ function wizardPage() {
       }
 
       var toml = '[agent]\n';
-      toml += 'name = "' + name.replace(/"/g, '\\"') + '"\n';
-      toml += 'description = "' + tpl.description.replace(/"/g, '\\"') + '"\n';
+      toml += 'name = "' + wizardTomlBasicEscape(name) + '"\n';
+      toml += 'description = "' + wizardTomlBasicEscape(tpl.description) + '"\n';
       toml += 'profile = "' + tpl.profile + '"\n\n';
       toml += '[model]\nprovider = "' + provider + '"\n';
-      toml += 'name = "' + model + '"\n\n';
-      toml += '[prompt]\nsystem = """\n' + tpl.system_prompt + '\n"""\n';
+      toml += 'model = "' + model + '"\n';
+      toml += 'system_prompt = """\n' + wizardTomlMultilineEscape(tpl.system_prompt) + '\n"""\n';
 
       this.creatingAgent = true;
       try {
@@ -450,13 +521,13 @@ function wizardPage() {
         if (res.agent_id) {
           this.createdAgent = { id: res.agent_id, name: res.name || name };
           this.setupSummary.agent = res.name || name;
-          OpenFangToast.success('Agent "' + (res.name || name) + '" created');
+          OpenFangToast.success((window.i18n ? window.i18n.t('wizard.agent_created') : 'Agent') + ' "' + (res.name || name) + '" ' + (window.i18n ? window.i18n.t('wizard.agent_created_suffix') || 'created' : 'created'));
           await Alpine.store('app').refreshAgents();
         } else {
-          OpenFangToast.error('Failed: ' + (res.error || 'Unknown error'));
+          OpenFangToast.error((window.i18n ? window.i18n.t('wizard.failed_create_agent') : 'Failed:') + ' ' + (res.error || 'Unknown error'));
         }
       } catch(e) {
-        OpenFangToast.error('Failed to create agent: ' + e.message);
+        OpenFangToast.error((window.i18n ? window.i18n.t('wizard.failed_create_agent') : 'Failed to create agent:') + ' ' + e.message);
       }
       this.creatingAgent = false;
     },
@@ -468,13 +539,14 @@ function wizardPage() {
         gemini: 'gemini-2.5-flash',
         groq: 'llama-3.3-70b-versatile',
         deepseek: 'deepseek-chat',
-        openrouter: 'openrouter/auto',
+        openrouter: 'openrouter/google/gemini-2.5-flash',
         mistral: 'mistral-large-latest',
         together: 'meta-llama/Llama-3-70b-chat-hf',
         fireworks: 'accounts/fireworks/models/llama-v3p1-70b-instruct',
         perplexity: 'llama-3.1-sonar-large-128k-online',
         cohere: 'command-r-plus',
-        xai: 'grok-2'
+        xai: 'grok-2',
+        'claude-code': 'claude-code/sonnet'
       };
       return defaults[providerId] || '';
     },
@@ -502,7 +574,7 @@ function wizardPage() {
       if (!ch) return;
       var token = this.channelToken.trim();
       if (!token) {
-        OpenFangToast.error('Please enter the ' + ch.token_label);
+        OpenFangToast.error((window.i18n ? window.i18n.t('wizard.enter_token') : 'Please enter the') + ' ' + ch.token_label);
         return;
       }
       this.configuringChannel = true;
@@ -513,9 +585,9 @@ function wizardPage() {
         await OpenFangAPI.post('/api/channels/' + ch.name + '/configure', { fields: fields });
         this.channelConfigured = true;
         this.setupSummary.channel = ch.display_name;
-        OpenFangToast.success(ch.display_name + ' configured and activated.');
+        OpenFangToast.success(ch.display_name + ' ' + (window.i18n ? window.i18n.t('wizard.channel_configured') : 'configured and activated.'));
       } catch(e) {
-        OpenFangToast.error('Failed: ' + (e.message || 'Unknown error'));
+        OpenFangToast.error((window.i18n ? window.i18n.t('wizard.failed_configure') : 'Failed:') + ' ' + (e.message || 'Unknown error'));
       }
       this.configuringChannel = false;
     },

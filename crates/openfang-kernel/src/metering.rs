@@ -128,6 +128,7 @@ impl MeteringEngine {
                 0.0
             },
             alert_threshold: budget.alert_threshold,
+            default_max_llm_tokens_per_hour: budget.default_max_llm_tokens_per_hour,
         }
     }
 
@@ -224,6 +225,8 @@ pub struct BudgetStatus {
     pub monthly_limit: f64,
     pub monthly_pct: f64,
     pub alert_threshold: f64,
+    /// Global default token limit per agent per hour (0 = use per-agent values).
+    pub default_max_llm_tokens_per_hour: u64,
 }
 
 /// Returns (input_per_million, output_per_million) pricing for a model.
@@ -231,6 +234,12 @@ pub struct BudgetStatus {
 /// Order matters: more specific patterns must come before generic ones
 /// (e.g. "gpt-4o-mini" before "gpt-4o", "gpt-4.1-mini" before "gpt-4.1").
 fn estimate_cost_rates(model: &str) -> (f64, f64) {
+    // ── Requesty (issue #995) ──────────────────────────────────
+    // Router-style gateway. IDs are `requesty/<upstream>/<model>` and
+    // resolve via substring match on the upstream model name below
+    // (e.g. "sonnet", "gpt-4o", "gemini", "deepseek", "llama").
+    // No early-return here — fall through to upstream patterns.
+
     // ── Anthropic ──────────────────────────────────────────────
     if model.contains("haiku") {
         return (0.25, 1.25);
@@ -343,6 +352,24 @@ fn estimate_cost_rates(model: &str) -> (f64, f64) {
         return (0.40, 0.40);
     }
 
+    // ── Chutes.ai ──────────────────────────────────────────────
+    if model.contains("chutes") {
+        return (0.25, 0.35);
+    }
+
+    // ── Venice.ai ──────────────────────────────────────────────
+    if model.contains("venice") {
+        return (0.20, 0.90);
+    }
+
+    // ── NVIDIA NIM ──────────────────────────────────────────────
+    if model.contains("nemotron-4-340b") {
+        return (4.20, 4.20);
+    }
+    if model.contains("nemotron") {
+        return (0.88, 0.88);
+    }
+
     // ── Open-source (Groq, Together, etc.) ─────────────────────
     if model.contains("llama-4-maverick") {
         return (0.50, 0.77);
@@ -371,16 +398,37 @@ fn estimate_cost_rates(model: &str) -> (f64, f64) {
     }
 
     // ── MiniMax ──────────────────────────────────────────────────
-    if model.contains("minimax") {
+    if model.contains("minimax") || model.contains("abab") {
+        if model.contains("m2.7") {
+            return (0.30, 1.20);
+        }
+        if model.contains("highspeed") {
+            return (0.80, 3.20);
+        }
+        if model.contains("m2.5") {
+            return (1.10, 4.40);
+        }
+        if model.contains("abab7") {
+            return (0.80, 2.40);
+        }
         return (1.00, 3.00);
     }
 
     // ── Zhipu / GLM ─────────────────────────────────────────────
-    if model.contains("glm-4-flash") {
-        return (0.10, 0.10);
+    if model.contains("glm-5") {
+        return (1.00, 3.20);
+    }
+    if model.contains("glm-4.7") {
+        return (0.60, 2.20);
+    }
+    if model.contains("glm-4-flash") || model.contains("glm-4.5-flash") {
+        return (0.0, 0.0); // free tier
+    }
+    if model.contains("glm-4.5") {
+        return (0.60, 2.20);
     }
     if model.contains("glm") {
-        return (1.50, 5.00);
+        return (0.60, 2.20);
     }
     if model.contains("codegeex") {
         return (0.10, 0.10);
@@ -389,6 +437,20 @@ fn estimate_cost_rates(model: &str) -> (f64, f64) {
     // ── Moonshot / Kimi ─────────────────────────────────────────
     if model.contains("moonshot") || model.contains("kimi") {
         return (0.80, 0.80);
+    }
+
+    // ── Volcano Engine / Doubao ────────────────────────────────
+    if model.contains("doubao-seed-code") {
+        return (0.50, 1.00);
+    }
+    if model.contains("doubao") && model.contains("mini") {
+        return (0.10, 0.10);
+    }
+    if model.contains("doubao") && model.contains("lite") {
+        return (0.30, 0.60);
+    }
+    if model.contains("doubao") {
+        return (0.80, 2.00);
     }
 
     // ── Baidu ERNIE ─────────────────────────────────────────────
@@ -429,7 +491,7 @@ fn estimate_cost_rates(model: &str) -> (f64, f64) {
     }
 
     // ── xAI / Grok ──────────────────────────────────────────────
-    if model.contains("grok-4.1") {
+    if model.contains("grok-4-1") {
         return (0.20, 0.50);
     }
     if model.contains("grok-4") {

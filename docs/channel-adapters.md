@@ -14,6 +14,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 - [Discord](#discord)
 - [Slack](#slack)
 - [WhatsApp](#whatsapp)
+- [Feishu / Lark](#feishu--lark)
 - [Signal](#signal)
 - [Matrix](#matrix)
 - [Email](#email)
@@ -45,7 +46,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 | Mattermost | WebSocket + REST v4 | `MATTERMOST_TOKEN`, `MATTERMOST_URL` | `Mattermost` |
 | Google Chat | Service account webhook | `GOOGLE_CHAT_SA_KEY`, `GOOGLE_CHAT_SPACE` | `Custom("google_chat")` |
 | Webex | Bot SDK WebSocket | `WEBEX_BOT_TOKEN` | `Custom("webex")` |
-| Feishu / Lark | Open Platform webhook | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` | `Custom("feishu")` |
+| Feishu / Lark | Open Platform Webhook / WebSocket | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` | `Custom("feishu")` |
 | Rocket.Chat | REST polling | `ROCKETCHAT_TOKEN`, `ROCKETCHAT_URL` | `Custom("rocketchat")` |
 | Zulip | Event queue long-polling | `ZULIP_EMAIL`, `ZULIP_API_KEY`, `ZULIP_URL` | `Custom("zulip")` |
 | XMPP | XMPP protocol (stub) | `XMPP_JID`, `XMPP_PASSWORD`, `XMPP_SERVER` | `Custom("xmpp")` |
@@ -283,6 +284,20 @@ The Telegram adapter uses long-polling via the `getUpdates` API. It polls every 
 
 Messages from authorized users are converted to `ChannelMessage` events and routed to the configured agent. Responses are sent back via the `sendMessage` API. Long responses are automatically split into multiple messages to respect Telegram's 4096-character limit using the shared `split_message()` utility.
 
+### Per-User Identity (`telegram_user_id`)
+
+Every inbound Telegram message exposes the sender's numeric Telegram user_id under `message.metadata["telegram_user_id"]` as a string. This is the stable, permanent identifier from `message.from.id` (or `message.sender_chat.id` for channel/group posts).
+
+Display names are not unique and can change, so agents that need deterministic per-user behavior — RBAC, per-user workspaces, family-assistant style memory keyed by person — should key on `telegram_user_id`, not `sender.display_name`.
+
+The bridge also injects the id into the prompt prefix when no `sender_email` is set:
+
+```
+[From: Alena (tg_id:554772934)] Hello!
+```
+
+Agents can read the raw metadata field via tool calls that expose `ChannelMessage.metadata` (the prompt prefix is a convenience for plain LLM context). `sender.platform_id` continues to hold the **chat_id** (not user_id), since replies are addressed to the chat, not the user.
+
 ### Interactive Setup
 
 ```bash
@@ -433,6 +448,60 @@ The WhatsApp adapter runs an HTTP server (on the configured `webhook_port`) that
 
 ---
 
+## Feishu / Lark
+
+### Prerequisites
+
+- A Feishu/Lark app created in [open.feishu.cn](https://open.feishu.cn/)
+- App ID and App Secret
+
+### Setup
+
+1. Create a custom app in Feishu Open Platform.
+2. Enable the IM message event subscription for your app.
+3. Set environment variable:
+
+```bash
+export FEISHU_APP_SECRET=cli_xxx_secret
+```
+
+4. Add to config (default: `websocket` mode):
+
+```toml
+[channels.feishu]
+app_id = "cli_xxx"
+app_secret_env = "FEISHU_APP_SECRET"
+mode = "websocket"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### Webhook Compatibility Mode
+
+If you need the legacy callback flow, switch to `webhook` and expose a public callback URL:
+
+```toml
+[channels.feishu]
+app_id = "cli_xxx"
+app_secret_env = "FEISHU_APP_SECRET"
+mode = "webhook"
+webhook_port = 8453
+default_agent = "assistant"
+```
+
+Then configure Feishu event callback to:
+
+`https://<your-domain>:8453/feishu/webhook`
+
+### How It Works
+
+- **websocket mode**: OpenFang obtains endpoint from Feishu and receives events via long connection (no public inbound webhook needed).
+- **webhook mode**: OpenFang starts an HTTP callback server and receives Feishu push events.
+- **send path (both modes)**: outbound messages still go through Feishu OpenAPI HTTP `im/v1/messages`.
+
+---
+
 ## Signal
 
 ### Prerequisites
@@ -553,10 +622,63 @@ Features:
 
 The `AgentRouter` determines which agent receives an incoming message. The routing logic is:
 
-1. **Per-channel default**: Each channel config has a `default_agent` field. Messages from that channel go to that agent.
-2. **User-agent binding**: If a user has previously been associated with a specific agent (via commands or configuration), messages from that user route to that agent.
-3. **Command prefix**: Users can switch agents by sending a command like `/agent coder` in the chat. Subsequent messages will be routed to the "coder" agent.
-4. **Fallback**: If no routing applies, messages go to the first available agent.
+1. **Bindings** (most specific first). Declarative `[[bindings]]` rules in `config.toml` map message attributes (channel, channel_id, peer_id, guild_id, account_id, roles) to agents. The router scores each rule by specificity and picks the highest-scoring match.
+2. **Per-channel default**: Each channel config has a `default_agent` field. Messages from that channel go to that agent.
+3. **User-agent binding**: If a user has previously been associated with a specific agent (via commands or configuration), messages from that user route to that agent.
+4. **Command prefix**: Users can switch agents by sending a command like `/agent coder` in the chat. Subsequent messages will be routed to the "coder" agent.
+5. **Fallback**: If no routing applies, messages go to the first available agent.
+
+### Bindings
+
+A binding has an `agent` (the target) and a `match_rule` (the criteria). All non-empty fields in the rule must match.
+
+```toml
+# Route a specific Discord channel to a dedicated agent.
+[[bindings]]
+agent = "researcher-medical"
+match_rule = { channel = "discord", channel_id = "1234567890" }
+
+[[bindings]]
+agent = "researcher-business"
+match_rule = { channel = "discord", channel_id = "9876543210" }
+
+# Catch-all for the same user on any other channel.
+[[bindings]]
+agent = "assistant"
+match_rule = { channel = "discord", peer_id = "user_discord_id" }
+```
+
+**`peer_id` vs `channel_id`** — these are easy to confuse and the difference matters:
+
+- `peer_id` matches the **user** (Discord user ID, Slack user ID, etc.).
+- `channel_id` matches the **channel/conversation** (Discord text channel, Slack conversation, Telegram chat).
+
+Use `peer_id` for "messages from this person." Use `channel_id` for "messages in this room."
+
+**Specificity scores** (higher wins):
+
+| Field        | Score |
+| ------------ | ----- |
+| `peer_id`    | 8     |
+| `channel_id` | 8     |
+| `guild_id`   | 4     |
+| `roles`      | 2     |
+| `account_id` | 2     |
+| `channel`    | 1     |
+
+A binding's score is the sum of its set fields. `peer_id` and `channel_id` are equally specific, so a rule with both (16) beats either alone (8). Ties are broken by declaration order in the config.
+
+**Adapter coverage for `channel_id`** — the following adapters populate `ctx.channel_id` directly from `sender.platform_id` (their "user" field is overloaded as a channel/conversation/room/space ID because that field doubles as the send target):
+
+`discord`, `slack`, `telegram`, `matrix`, `mattermost`, `teams`, `webex`, `rocketchat`, `nextcloud`, `pumble`, `revolt`, `guilded`, `feishu`, `lark`, `keybase`, `google_chat`, `line`, `twist`, `flock`, `twitch`.
+
+(Feishu Intl region emits `Custom("lark")` rather than `Custom("feishu")`; both spellings are recognized.)
+
+Adapters not on this list (Reddit, Bluesky, Mastodon, Signal, Email, ntfy, Discourse, etc.) carry a *user* ID in `platform_id` and have no per-conversation concept, or use a hybrid scheme (IRC, Zulip flip between channel and user based on `is_group`). Bindings targeting `channel_id` on those platforms will only match if the adapter writes a `channel_id` key into message metadata.
+
+The kernel emits a startup warning when a binding sets `channel_id` for a non-supporting adapter, so misconfigurations surface early instead of silently routing nowhere. The single source of truth for this list is `CHANNELS_WITH_PLATFORM_ID_AS_CHANNEL` in `openfang-types::config`, consumed by both routing (`ChannelMessage::channel_id()`) and config validation.
+
+**Strict parsing** — `AgentBinding` and `BindingMatchRule` use `#[serde(deny_unknown_fields)]`. Typos at the binding level (e.g. `match_rules` for `match_rule`, `channnel_id` for `channel_id`) fail config load with a clear error rather than parsing into a no-op rule that silently matches every message. Existing configs that work today are unaffected; only configs with stray/misspelled fields inside a `[[bindings]]` block need a fix. The top-level `KernelConfig` deliberately stays permissive so unrecognized top-level keys (forward-compat, downstream forks) don't break startup.
 
 ---
 
