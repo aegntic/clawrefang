@@ -1,0 +1,540 @@
+# Instincts generated from https://github.com/aegntic/clawrefang
+# Generated: 2026-05-12T11:28:48.804Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: clawrefang-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Commit Length
+
+## Action
+
+Keep commit messages concise (~17 characters)
+
+## Evidence
+
+- Average commit message length: 17 chars
+- Based on 100 commits
+
+---
+id: clawrefang-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: clawrefang-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: clawrefang-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: clawrefang-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: clawrefang-test-types
+trigger: "when planning tests for a feature"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Test Types
+
+## Action
+
+Write unit, integration tests to match project standards
+
+## Evidence
+
+- Test types detected: unit, integration
+- Coverage config: no
+
+---
+id: clawrefang-workflow-multi-crate-bugfix-batch
+trigger: "when doing multi crate bugfix batch"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Workflow Multi Crate Bugfix Batch
+
+## Action
+
+Follow the multi-crate-bugfix-batch workflow:
+1. Identify bugs or minor improvements in various crates and modules.
+2. Edit relevant source files (Rust, JS, TOML, etc.) in multiple crates (api, kernel, runtime, cli, channels, etc.).
+3. Update shared files like Cargo.toml and Cargo.lock to reflect dependency or version changes.
+4. Commit all changes together with a message like 'batch fixes', 'bugfix batch', or 'bugfixes batch'.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~10x per month
+- Files: Cargo.toml, Cargo.lock, crates/openfang-api/src/routes.rs
+
+---
+id: clawrefang-workflow-version-bump
+trigger: "when doing version bump"
+confidence: 0.8
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Workflow Version Bump
+
+## Action
+
+Follow the version-bump workflow:
+1. Edit Cargo.toml (and sometimes Cargo.lock) to increment the version number.
+2. Commit with a message like 'version bump', 'bump version', or similar.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~6x per month
+- Files: Cargo.toml, Cargo.lock
+
+---
+id: clawrefang-workflow-api-routes-update
+trigger: "when doing api routes update"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Workflow Api Routes Update
+
+## Action
+
+Follow the api-routes-update workflow:
+1. Edit crates/openfang-api/src/routes.rs to add or change API endpoints.
+2. Optionally update server.rs, middleware.rs, or ws.rs for related logic.
+3. Update static assets (HTML, JS) if the API surface or UI changes.
+4. Update Cargo.toml and/or Cargo.lock if dependencies are affected.
+5. Commit all related changes together.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~7x per month
+- Files: crates/openfang-api/src/routes.rs, crates/openfang-api/src/server.rs, crates/openfang-api/src/middleware.rs
+
+---
+id: clawrefang-workflow-agent-or-extension-metadata-batch-update
+trigger: "when doing agent or extension metadata batch update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Workflow Agent Or Extension Metadata Batch Update
+
+## Action
+
+Follow the agent-or-extension-metadata-batch-update workflow:
+1. Edit multiple agent or extension .toml files (e.g., agents/*/agent.toml, crates/openfang-extensions/integrations/*.toml).
+2. Optionally update related Rust source files in kernel, types, or registry.
+3. Update Cargo.toml and/or Cargo.lock if dependencies are affected.
+4. Commit all changes together.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: agents/*/agent.toml, crates/openfang-extensions/integrations/*.toml, crates/openfang-kernel/src/kernel.rs
+
+---
+id: clawrefang-workflow-community-or-ci-config-update
+trigger: "when doing community or ci config update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/aegntic/clawrefang
+---
+
+# Clawrefang Workflow Community Or Ci Config Update
+
+## Action
+
+Follow the community-or-ci-config-update workflow:
+1. Edit .github/ workflows, issue templates, or pull request templates.
+2. Optionally update README.md, SECURITY.md, or docs/*.md.
+3. Optionally make minor code or config changes (e.g., kernel.rs, model_catalog.rs, install.sh).
+4. Commit all changes together.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: .github/workflows/*.yml, .github/ISSUE_TEMPLATE/*.yml, .github/pull_request_template.md
+
+---
+id: clawrefang-instinct-file-naming-camelcase
+trigger: "When creating or renaming a file in the codebase."
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct File Naming Camelcase
+
+## Action
+
+Name the file using camelCase.
+
+## Evidence
+
+- Pattern in namingConventions.files: camelCase
+
+---
+id: clawrefang-instinct-function-naming-camelcase
+trigger: "When defining a new function."
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Function Naming Camelcase
+
+## Action
+
+Name the function using camelCase.
+
+## Evidence
+
+- Pattern in namingConventions.functions: camelCase
+
+---
+id: clawrefang-instinct-class-naming-pascalcase
+trigger: "When defining a new class or struct."
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Class Naming Pascalcase
+
+## Action
+
+Name the class/struct using PascalCase.
+
+## Evidence
+
+- Pattern in namingConventions.classes: PascalCase
+
+---
+id: clawrefang-instinct-constant-naming-screaming-snake-case
+trigger: "When defining a constant."
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Constant Naming Screaming Snake Case
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE.
+
+## Evidence
+
+- Pattern in namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: clawrefang-instinct-import-style-relative
+trigger: "When importing modules in Rust."
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Import Style Relative
+
+## Action
+
+Use relative import paths.
+
+## Evidence
+
+- Pattern in importStyle: relative
+
+---
+id: clawrefang-instinct-export-style-named
+trigger: "When exporting functions or types."
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Export Style Named
+
+## Action
+
+Use named exports.
+
+## Evidence
+
+- Pattern in exportStyle: named
+
+---
+id: clawrefang-instinct-test-file-pattern
+trigger: "When creating a new test file."
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Test File Pattern
+
+## Action
+
+Name the file with the pattern *.test.ts.
+
+## Evidence
+
+- Pattern in testing.filePattern: *.test.ts
+
+---
+id: clawrefang-instinct-test-type-unit-integration
+trigger: "When writing tests."
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Test Type Unit Integration
+
+## Action
+
+Write both unit and integration tests as appropriate.
+
+## Evidence
+
+- Pattern in testing.testTypes: unit, integration
+
+---
+id: clawrefang-instinct-commit-message-batch-fixes
+trigger: "When committing a batch of bugfixes or minor improvements across multiple crates."
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Commit Message Batch Fixes
+
+## Action
+
+Use a commit message like 'batch fixes', 'bugfix batch', or 'bugfixes batch'.
+
+## Evidence
+
+- Seen in commits: 'batch fixes', 'bugfix batch', 'bugfixes batch'
+
+---
+id: clawrefang-instinct-commit-message-version-bump
+trigger: "When committing a version increment."
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Commit Message Version Bump
+
+## Action
+
+Use a commit message like 'version bump' or 'bump version'.
+
+## Evidence
+
+- Seen in commits: 'version bump', 'bump version'
+
+---
+id: clawrefang-instinct-multi-crate-bugfix-batch
+trigger: "When fixing multiple bugs or making small improvements across several parts of the codebase at once."
+confidence: 0.97
+domain: workflow
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Multi Crate Bugfix Batch
+
+## Action
+
+Edit relevant files across multiple crates and commit all changes together with a message like 'batch fixes' or 'bugfix batch'.
+
+## Evidence
+
+- Workflow: multi-crate-bugfix-batch
+- Commits: 'batch fixes', 'bugfix batch'
+
+---
+id: clawrefang-instinct-version-bump
+trigger: "When releasing a new version or starting a new development cycle."
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Version Bump
+
+## Action
+
+Increment the version in Cargo.toml (and Cargo.lock if needed) and commit with a message like 'version bump'.
+
+## Evidence
+
+- Workflow: version-bump
+- Commits: 'version bump', 'bump version'
+
+---
+id: clawrefang-instinct-api-routes-update
+trigger: "When adding, modifying, or fixing API endpoints or their integration with the server."
+confidence: 0.92
+domain: workflow
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Api Routes Update
+
+## Action
+
+Edit routes.rs and related files, update static assets if needed, and commit all related changes together.
+
+## Evidence
+
+- Workflow: api-routes-update
+- Files: crates/openfang-api/src/routes.rs, server.rs, middleware.rs, ws.rs, static assets
+
+---
+id: clawrefang-instinct-agent-extension-metadata-batch-update
+trigger: "When updating configuration or metadata for multiple agents or extensions at once."
+confidence: 0.88
+domain: workflow
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Agent Extension Metadata Batch Update
+
+## Action
+
+Edit relevant .toml files and related Rust source files, update Cargo.toml/Cargo.lock if needed, and commit all changes together.
+
+## Evidence
+
+- Workflow: agent-or-extension-metadata-batch-update
+- Files: agents/*/agent.toml, crates/openfang-extensions/integrations/*.toml
+
+---
+id: clawrefang-instinct-community-ci-config-update
+trigger: "When improving community health files, CI workflows, or project documentation."
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: aegntic/clawrefang
+---
+
+# Clawrefang Instinct Community Ci Config Update
+
+## Action
+
+Edit .github/ workflows, templates, docs, and optionally minor code/config files, then commit all changes together.
+
+## Evidence
+
+- Workflow: community-or-ci-config-update
+- Files: .github/workflows/*.yml, README.md, docs/*.md
+
